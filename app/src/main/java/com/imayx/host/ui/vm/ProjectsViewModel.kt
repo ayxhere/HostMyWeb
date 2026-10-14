@@ -63,6 +63,10 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         _scriptResult.value = null
     }
 
+    init {
+        viewModelScope.launch { g.host.notices.collect { _messages.emit(it) } }
+    }
+
     val activeProject: String get() = g.settings.activeProject
     val hostState get() = g.host.state
 
@@ -286,6 +290,16 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     /** Multi-start: hosts every selected project at the same time (replaces what was running). */
     fun startSelected(names: List<String>) {
         if (names.isEmpty()) return
+        // Two projects on the same port can never run together: tell the user which ones.
+        val picked = _ui.value.items.map { it.config }.filter { it.name in names }
+        val clash = picked.groupBy { it.port }.filter { it.value.size > 1 }
+        if (clash.isNotEmpty()) {
+            val msg = clash.entries.joinToString("; ") { (port, list) ->
+                list.joinToString(" + ") { it.name } + " share port $port"
+            }
+            _messages.tryEmit("$msg. Change a port in Settings of one project first.")
+            return
+        }
         g.projects.setActive(names.first())
         HostService.startMany(getApplication<Application>(), names)
         _imported.value = null

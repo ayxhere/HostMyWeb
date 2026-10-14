@@ -18,3 +18,9 @@
 - CORS for https://imayx.in, https://www.imayx.in, https://wish.imayx.in (+ OPTIONS preflight).
 - JSON errors only, `/api/health`, per-request logs, build marker header `X-Wish-Build`.
 - `WISH_BASE_URL` now defaults to https://wish.imayx.in (share links point at the wish host).
+
+## Fixes (round 2)
+- wish v2: ROOT is now the parent of src/ so `public/index.html` is found ("Missing public/index.html" fixed).
+- New / imported projects get the next FREE port (was: all 3000), skipping 3101/3102.
+- Multi-start refuses to start when two selected projects share a port and names them.
+- A project that fails to start in a multi-start now shows a message (also in Logs).

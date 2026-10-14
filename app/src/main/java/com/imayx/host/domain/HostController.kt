@@ -17,7 +17,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -37,6 +39,10 @@ class HostController(
 ) {
     private val _state = MutableStateFlow(HostState())
     val state: StateFlow<HostState> = _state
+
+    /** One-line notices for the UI (e.g. a project of a multi-start could not start). */
+    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val notices: SharedFlow<String> = _notices
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -132,6 +138,7 @@ class HostController(
         val unavailable = rt.unavailableReason()
         if (unavailable != null) {
             LogBus.e(LogCategory.SYSTEM, "Could not start ${cfg.name}: $unavailable")
+            _notices.tryEmit("${cfg.name}: $unavailable")
             return
         }
         rt.onCrash = {
@@ -144,7 +151,9 @@ class HostController(
             synchronized(extras) { extras[cfg.name] = cfg to rt }
             LogBus.i(LogCategory.SYSTEM, "Started ${cfg.name} (${cfg.runtime}) on port ${cfg.port}")
         } catch (e: Exception) {
-            LogBus.e(LogCategory.SYSTEM, "Could not start ${cfg.name}: ${e.message ?: e.javaClass.simpleName}")
+            val why = e.message ?: e.javaClass.simpleName
+            LogBus.e(LogCategory.SYSTEM, "Could not start ${cfg.name}: $why")
+            _notices.tryEmit("${cfg.name} did not start: $why")
         }
     }
 
@@ -243,6 +252,7 @@ class HostController(
     private fun failStart(cfg: ProjectConfig, message: String) {
         teardown()
         _state.value = HostState(ProcessState.FAILED, cfg.name, cfg.runtime, cfg.port, error = message)
+        _notices.tryEmit("${cfg.name} did not start: $message")
         settings.hostingWanted = false
         LogBus.e(LogCategory.SYSTEM, "Start failed: $message")
     }

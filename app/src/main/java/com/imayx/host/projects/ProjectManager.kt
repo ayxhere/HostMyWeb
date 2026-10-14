@@ -35,6 +35,14 @@ class ProjectManager(
 
     fun listInfo(): List<ProjectInfo> = list().map { info(it) }
 
+    /** First port at or above the default that no project uses (and not the embedded 3101/3102). */
+    fun nextFreePort(): Int {
+        val used = store.list().map { it.port }.toSet() + setOf(3101, 3102)
+        var p = settings.defaultPort
+        while (p in used) p++
+        return p
+    }
+
     private fun requireValidName(name: String) {
         if (!PathUtil.isValidProjectName(name)) {
             throw ProjectException("Invalid name. Use letters, digits, '.', '_' or '-' (max 48 characters, must start with a letter or digit).")
@@ -46,7 +54,7 @@ class ProjectManager(
         if (store.exists(name)) throw ProjectException("A project named \"$name\" already exists")
         val dir = store.projectDir(name)
         if (!dir.mkdirs()) throw ProjectException("Could not create project directory")
-        val cfg = ProjectConfig(name = name, runtime = runtime, port = settings.defaultPort)
+        val cfg = ProjectConfig(name = name, runtime = runtime, port = nextFreePort())
         store.save(cfg)
         if (runtime == RuntimeType.STATIC) {
             File(dir, "index.html").writeText(starterHtml(name))
@@ -156,7 +164,7 @@ class ProjectManager(
         try {
             dir.mkdirs()
             val n = ZipTools.extract(zip, dir, info.stripPrefix, onProgress)
-            val cfg = ProjectConfig(name = name, port = settings.defaultPort)
+            val cfg = ProjectConfig(name = name, port = nextFreePort())
             store.save(cfg)
             if (settings.activeProject.isBlank()) settings.activeProject = name
             LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")

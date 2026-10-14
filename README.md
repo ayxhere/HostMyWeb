@@ -20,4 +20,3 @@ Tokens are AES-GCM encrypted with the Android Keystore, redacted from every log,
 
 ## Node
 "Node runtime not installed" until you provide an Android-compatible ARM64 Node build (Settings → Node runtime). Official glibc Linux builds will not run.
-# HostMyWeb
