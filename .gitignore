@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+.idea/
+.acside/
+local.properties
+/build/
+/app/build/
+.cxx/
+.externalNativeBuild/
+*.jks
+*.keystore
+*.log
+.env
+.env.*
+secrets.*
+# Native executables fetched by CI (never commit binaries)
+/app/src/main/jniLibs/

@@ -1,0 +1,5 @@
+[33mf9de1eb[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m v6.53 — dialogs black, status upload toast, fullscreen music sheet, header round + smooth tabs, status delete 2-way sync, Sarvam direct-opus voice
+[33m4771e37[m Connect Cloudflare tunnel token to host
+[33mb290175[m Fix HostService configuration
+[33mfb0a88f[m Fix Kotlin source compilation errors
+[33m31743a9[m Fix Java Kotlin JVM target

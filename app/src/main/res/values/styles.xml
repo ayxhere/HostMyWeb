@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Plain framework theme (no Material3 XML theme references). All real styling is in Compose. -->
+    <style name="Theme.IMAYXHost" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/ix_black</item>
+        <item name="android:colorBackground">@color/ix_black</item>
+        <item name="android:statusBarColor">@color/ix_black</item>
+        <item name="android:navigationBarColor">@color/ix_black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
