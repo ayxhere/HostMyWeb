@@ -310,7 +310,12 @@ class TunnelController(
 
         if (level == LogLevel.ERROR) {
             val friendly = friendlyError(line)
-            _state.update { it.copy(lastError = friendly) }
+            _state.update { it ->
+                // Once connected, don't let routine log noise (e.g. the Named Tunnel's
+                // expected DNS-fallback warnings) repaint a scary red banner over a
+                // healthy tunnel. Genuine origin failures are still surfaced below.
+                if (it.status == TunnelStatus.CONNECTED) it else it.copy(lastError = friendly)
+            }
         } else if (line.contains("Unable to reach the origin service", ignoreCase = true)) {
             _state.update { it.copy(lastError = friendlyError(line)) }
         }
