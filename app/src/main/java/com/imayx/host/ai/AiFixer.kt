@@ -134,7 +134,8 @@ object AiFixer {
             onProgress("Applying ${parsed.edits.size} edit(s)…")
             var applied = 0
             for (e in parsed.edits) {
-                val target = safeTarget(dir, e.path) ?: run {
+                val target = safeTarget(dir, e.path)
+                if (target == null) {
                     LogBus.w(LogCategory.NODE, "AI fix rejected unsafe path: ${e.path}")
                     continue
                 }
