@@ -1,7 +1,6 @@
 package com.imayx.host.node
 
 import android.content.Context
-import androidx.core.content.ContextCompat
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import com.imayx.host.data.LogBus
