@@ -33,7 +33,7 @@ class AppGraph(val app: Application) {
     val cloudflareApi = CloudflareApi { secrets.get(SecretStore.KEY_API_TOKEN) }
     val nodeInstaller = NodeInstaller(app)
     val runtimes = RuntimeManager(app, projectStore, secrets, nodeInstaller, registry)
-    val host = HostController(app, settings, projectStore, runtimes, tunnel, secrets)
+    val host = HostController(app, settings, projectStore, runtimes, tunnel, secrets, backups)
     val monitor = ResourceMonitor(app)
 }
 

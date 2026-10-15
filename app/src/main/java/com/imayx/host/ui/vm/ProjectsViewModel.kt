@@ -308,6 +308,40 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         _imported.value = null
     }
 
+    /**
+     * Manual AI fix: Groq reads the project's recent errors and patches its files.
+     * Runs in the background; progress and the result arrive as messages.
+     */
+    fun aiFix(name: String) {
+        val app = getApplication<Application>()
+        if (!com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
+            viewModelScope.launch { _messages.emit("Add a Groq API key first: Settings → AI auto-fix") }
+            return
+        }
+        _ui.value = _ui.value.copy(busy = "AI fixing $name…")
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val res = com.imayx.host.ai.AiFixer.fixProject(
+                    app, g.settings, g.secrets, g.backups, g.projectStore, name,
+                    "manual AI Fix requested by user",
+                    onProgress = { step -> _ui.value = _ui.value.copy(busy = "AI fixing $name… $step") }
+                )
+                _messages.emit(
+                    if (res.ok && res.editsApplied > 0)
+                        "AI fix: ${res.editsApplied} edit(s) applied to $name (backup ${res.backupName}). Restart hosting to apply."
+                    else if (res.ok)
+                        "AI fix: ${res.summary.take(200)}"
+                    else
+                        "AI fix failed: ${res.summary.take(200)}"
+                )
+            } catch (e: Exception) {
+                if (e !is CancellationException) _messages.emit("AI fix error: ${e.message}")
+            } finally {
+                _ui.value = _ui.value.copy(busy = null)
+            }
+        }
+    }
+
     /** Multi-start: hosts every selected project at the same time (replaces what was running). */
     fun startSelected(names: List<String>) {
         if (names.isEmpty()) return

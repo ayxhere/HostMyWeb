@@ -216,7 +216,8 @@ fun ProjectsScreen(
                             exportFor = info.config.name
                             exportLauncher.launch(info.config.name + ".zip")
                         },
-                        onDelete = { deleteFor = info.config.name }
+                        onDelete = { deleteFor = info.config.name },
+                        onAiFix = { vm.aiFix(info.config.name) }
                     )
                 }
                 item { Spacer(Modifier.height(12.dp)) }
@@ -390,7 +391,8 @@ private fun ProjectCard(
     onRename: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onAiFix: () -> Unit
 ) {
     val c = Ix.c
     val cfg = info.config
@@ -432,6 +434,12 @@ private fun ProjectCard(
                     DropdownMenuItem(text = { Text("Rename", color = c.text) }, onClick = { menu = false; onRename() })
                     DropdownMenuItem(text = { Text("Duplicate", color = c.text) }, onClick = { menu = false; onDuplicate() })
                     DropdownMenuItem(text = { Text("Export ZIP", color = c.text) }, onClick = { menu = false; onExport() })
+                    if (cfg.runtime == RuntimeType.SERVER) {
+                        DropdownMenuItem(
+                            text = { Text("✦ AI Fix (Groq)", color = c.text) },
+                            onClick = { menu = false; onAiFix() }
+                        )
+                    }
                     DropdownMenuItem(text = { Text("Delete", color = c.danger) }, onClick = { menu = false; onDelete() })
                 }
             }

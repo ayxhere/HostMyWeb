@@ -40,7 +40,8 @@ class HostController(
     private val store: ProjectStore,
     private val runtimes: RuntimeManager,
     private val tunnel: TunnelController,
-    private val secrets: SecretStore
+    private val secrets: SecretStore,
+    private val backups: com.imayx.host.backup.BackupManager
 ) {
     private val _state = MutableStateFlow(HostState())
     val state: StateFlow<HostState> = _state
@@ -172,6 +173,23 @@ class HostController(
         if (err != null) {
             LogBus.e(LogCategory.NODE, err)
             _notices.tryEmit(err)
+            // AI auto-fix (no permission asked — the user enabled it in Settings):
+            // let Groq read the failure, patch the project, then restart once.
+            // Cooldown inside maybeAutoFix prevents fix loops.
+            val names = specs.map { it.name }
+            scope.launch {
+                for (n in names) {
+                    val res = com.imayx.host.ai.AiFixer.maybeAutoFix(
+                        appContext, settings, secrets, backups, store, n,
+                        "server failed to start: $err"
+                    )
+                    if (res != null && res.ok && res.editsApplied > 0) {
+                        LogBus.i(LogCategory.NODE, "AI auto-fix patched $n — restarting server runtime")
+                        refreshServerRuntime()
+                        break
+                    }
+                }
+            }
         }
         return err
     }

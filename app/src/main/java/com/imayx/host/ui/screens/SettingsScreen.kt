@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -74,6 +75,8 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
     var nodeUrl by remember(ui.nodeUrl) { mutableStateOf(ui.nodeUrl) }
     var tunnelToken by remember { mutableStateOf("") }
     var apiToken by remember { mutableStateOf("") }
+    var groqKey by remember { mutableStateOf("") }
+    var aiModelText by remember(ui.aiModel) { mutableStateOf(ui.aiModel) }
     var creds by remember { mutableStateOf(!lock.isEnabled() || lock.isSensitiveUnlocked()) }
     var pinDialog by remember { mutableStateOf(false) }
     var disableDialog by remember { mutableStateOf(false) }
@@ -184,6 +187,78 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
                 Spacer(Modifier.height(8.dp))
                 IxButton("Remove runtime", { removeNode = true }, icon = Icons.Rounded.Delete, kind = BtnKind.Danger)
             }
+        }
+
+        SectionLabel("AI auto-fix (Groq)")
+        IxCard {
+            Text(
+                "When a server project crashes, Groq reads the error logs and patches the project files by itself — no permission asked. A backup ZIP is always made before any edit.",
+                color = c.soft, style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(10.dp))
+            SwitchRow(
+                "AI auto-fix",
+                ui.aiAutoFix && ui.hasGroqKey,
+                { vm.setAiAutoFix(it) },
+                subtitle = if (!ui.hasGroqKey) "Add a Groq API key first"
+                else if (ui.aiAutoFix) "On — crashes are fixed automatically" else "Off — fix manually with the AI Fix button",
+                enabled = ui.hasGroqKey
+            )
+            Spacer(Modifier.height(8.dp))
+            IxTextField(
+                groqKey, { groqKey = it }, "Groq API key",
+                placeholder = "gsk_…",
+                supportingText = "From console.groq.com — stored encrypted, never logged",
+                visualTransformation = PasswordVisualTransformation()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                IxButton(
+                    "Save key",
+                    { if (vm.saveGroqKey(groqKey)) { groqKey = ""; snack("Groq key saved") } else snack("Key is empty") },
+                    kind = BtnKind.Secondary, enabled = groqKey.isNotBlank()
+                )
+                if (ui.hasGroqKey) IxButton("Remove", { vm.clearGroqKey(); snack("Groq key removed") }, kind = BtnKind.Danger)
+            }
+            Spacer(Modifier.height(8.dp))
+            IxTextField(
+                aiModelText, { aiModelText = it }, "Model",
+                supportingText = "Groq chat model id"
+            )
+            IxButton(
+                "Save model",
+                { vm.setAiModel(aiModelText); snack("Model saved") },
+                kind = BtnKind.Secondary, enabled = aiModelText.isNotBlank()
+            )
+        }
+
+        SectionLabel("Background (24/7)")
+        IxCard {
+            KeyValueRow(
+                "Battery",
+                if (ui.batteryUnrestricted) "Unrestricted" else "Optimized — Android may kill the app",
+                valueColor = if (ui.batteryUnrestricted) c.ok else c.warn
+            )
+            if (!ui.batteryUnrestricted) {
+                Spacer(Modifier.height(8.dp))
+                IxButton("Allow background run", {
+                    try {
+                        ctx.startActivity(com.imayx.host.service.HostService.batteryUnrestrictedIntent(ctx))
+                    } catch (_: Exception) {
+                        snack("Could not open system settings")
+                    }
+                    vm.refresh()
+                })
+                Spacer(Modifier.height(4.dp))
+            }
+            SwitchRow(
+                "Start hosting after reboot", ui.startOnBoot, { vm.setStartOnBoot(it) },
+                subtitle = "Hosting resumes automatically when the phone restarts"
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Tip: on Xiaomi / Oppo / Vivo also allow \"Autostart\" and set battery to \"No restrictions\" in system settings, and lock IMAYX Host in the recent-apps list — otherwise the phone will still kill it.",
+                color = c.soft, style = MaterialTheme.typography.bodySmall
+            )
         }
 
         SectionLabel("Security")

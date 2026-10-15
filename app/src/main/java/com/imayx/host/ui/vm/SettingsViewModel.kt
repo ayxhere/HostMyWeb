@@ -36,6 +36,10 @@ data class SettingsUi(
     val nodePercent: Int? = null,
     val lockEnabled: Boolean = false,
     val biometric: Boolean = false,
+    val aiAutoFix: Boolean = false,
+    val aiModel: String = "llama-3.3-70b-versatile",
+    val hasGroqKey: Boolean = false,
+    val batteryUnrestricted: Boolean = false,
     val projectsBytes: Long = 0,
     val backupsBytes: Long = 0,
     val binariesBytes: Long = 0,
@@ -51,12 +55,16 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh() {
         val s = g.settings
+        val app = getApplication<Application>()
         _ui.value = _ui.value.copy(
             theme = s.themeMode, port = s.defaultPort, primaryPort = s.primaryPort,
             defaultProject = s.activeProject, defaultDomain = s.defaultDomain,
             startOnBoot = s.startOnBoot, ayxBackend = s.ayxBackendEnabled, notifications = s.notificationsEnabled, autosave = s.autosave,
             cloudflaredUrl = s.cloudflaredUrl, nodeUrl = s.nodeRuntimeUrl,
-            lockEnabled = g.appLock.isEnabled(), biometric = g.appLock.isBiometricEnabled()
+            lockEnabled = g.appLock.isEnabled(), biometric = g.appLock.isBiometricEnabled(),
+            aiAutoFix = s.aiAutoFix, aiModel = s.aiModel,
+            hasGroqKey = !g.secrets.get(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY).isNullOrBlank(),
+            batteryUnrestricted = com.imayx.host.service.HostService.isBatteryUnrestricted(app)
         )
         viewModelScope.launch {
             val ctx = getApplication<Application>()
@@ -92,6 +100,22 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setAutosave(v: Boolean) { g.settings.autosave = v; refresh() }
     fun setCloudflaredUrl(v: String) { g.settings.cloudflaredUrl = v; refresh() }
     fun setNodeUrl(v: String) { g.settings.nodeRuntimeUrl = v; refresh() }
+    fun setAiAutoFix(v: Boolean) { g.settings.aiAutoFix = v; refresh() }
+    fun setAiModel(v: String) { g.settings.aiModel = v; refresh() }
+
+    /** Stores the Groq API key encrypted in the Keystore-backed SecretStore. */
+    fun saveGroqKey(key: String): Boolean {
+        val clean = key.trim()
+        if (clean.isBlank()) return false
+        val ok = g.secrets.put(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY, clean)
+        refresh()
+        return ok
+    }
+
+    fun clearGroqKey() {
+        g.secrets.remove(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY)
+        refresh()
+    }
 
     fun setPin(pin: String) {
         g.appLock.setPin(pin)
