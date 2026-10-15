@@ -5,6 +5,7 @@ import com.imayx.host.utils.Fmt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,10 +31,18 @@ object LogBus {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /**
+     * Wake-up signal for the publisher. CONFLATED = bursts collapse into one wakeup,
+     * and the coroutine below suspends with zero CPU cost while no logs arrive
+     * (previously this was a blind 200ms poll loop running forever).
+     */
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+
     init {
         scope.launch {
-            while (true) {
-                delay(200)
+            for (u in wake) {
+                delay(150) // debounce: let a burst accumulate into a single publish
+                while (wake.tryReceive().isSuccess) { /* drain */ }
                 if (dirty) publish()
             }
         }
@@ -56,6 +65,7 @@ object LogBus {
             while (buffer.size > MAX_ENTRIES) buffer.removeFirst()
             dirty = true
         }
+        wake.trySend(Unit)
     }
 
     fun d(category: LogCategory, message: String) = log(category, LogLevel.DEBUG, message)

@@ -27,6 +27,13 @@ class AppSettings(context: Context) {
         _version.value = _version.value + 1
     }
 
+    /** Untyped long storage for internal bookkeeping (AI cooldowns, etc.). No UI binding. */
+    fun prefsLong(key: String, def: Long): Long = prefs.getLong(key, def)
+
+    fun putLong(key: String, value: Long) {
+        prefs.edit().putLong(key, value).apply()
+    }
+
     var themeMode: ThemeMode
         get() = _theme.value
         set(v) {
@@ -139,6 +146,22 @@ class AppSettings(context: Context) {
         get() = prefs.getString("default_domain", "") ?: ""
         set(v) {
             prefs.edit().putString("default_domain", v.trim()).apply()
+            bump()
+        }
+
+    /** AI auto-fix: when a hosted server crashes, Groq diagnoses the logs and patches the project automatically. */
+    var aiAutoFix: Boolean
+        get() = prefs.getBoolean("ai_autofix", false)
+        set(v) {
+            prefs.edit().putBoolean("ai_autofix", v).apply()
+            bump()
+        }
+
+    /** Groq model used by the AI auto-fixer. */
+    var aiModel: String
+        get() = prefs.getString("ai_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile"
+        set(v) {
+            prefs.edit().putString("ai_model", v.trim().ifBlank { "llama-3.3-70b-versatile" }).apply()
             bump()
         }
 }

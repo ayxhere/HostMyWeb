@@ -156,6 +156,22 @@ object ServerRuntime {
         }
     }
 
+    /** Ports the manifest expects to be listening (for watchdog health checks). */
+    fun wantedPorts(ctx: Context): List<Int> {
+        return try {
+            val f = File(serversDir(ctx), "servers.json")
+            if (!f.isFile) return emptyList()
+            val json = org.json.JSONObject(f.readText())
+            val arr = json.optJSONArray("servers") ?: return emptyList()
+            (0 until arr.length()).mapNotNull {
+                val p = arr.optJSONObject(it)?.optInt("port", -1) ?: -1
+                if (p in 1024..65535) p else null
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     // ------------------------------------------------------------------ internals
 
     private fun writeManifest(dir: File, specs: List<ServerSpec>) {

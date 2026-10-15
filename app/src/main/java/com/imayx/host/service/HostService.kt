@@ -14,16 +14,20 @@ import androidx.core.content.ContextCompat
 import com.imayx.host.MainActivity
 import com.imayx.host.R
 import com.imayx.host.data.HostState
+import com.imayx.host.data.LogBus
+import com.imayx.host.data.LogCategory
 import com.imayx.host.data.ProcessState
 import com.imayx.host.data.TunnelState
 import com.imayx.host.data.TunnelStatus
 import com.imayx.host.graph
 import com.imayx.host.node.AyxBackendRuntime
+import com.imayx.host.node.ServerRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
@@ -60,10 +64,24 @@ class HostService : Service() {
         fun stop(context: Context) {
             context.startService(Intent(context, HostService::class.java).setAction(ACTION_STOP))
         }
+
+        /** True when the OS is told not to kill this app in the background. */
+        fun isBatteryUnrestricted(context: Context): Boolean {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            return pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
+
+        /** Intent that opens the system "don't optimize this app" prompt. */
+        fun batteryUnrestrictedIntent(context: Context): Intent =
+            Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:${context.packageName}")
+            )
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var observer: Job? = null
+    private var watchdog: Job? = null
     private var seenActive = false
 
     override fun onCreate() {
@@ -97,6 +115,7 @@ class HostService : Service() {
                     AyxBackendRuntime.ensureStarted(this)
                 }
                 observeUntilStopped(expectStop = false)
+                startWatchdog()
             }
         }
         return START_STICKY
@@ -136,12 +155,62 @@ class HostService : Service() {
 
     private fun finish(removeNotification: Boolean) {
         observer?.cancel()
+        watchdog?.cancel()
         if (removeNotification) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             stopForeground(STOP_FOREGROUND_DETACH)
         }
         stopSelf()
+    }
+
+    /**
+     * 24/7 self-heal. Every 60s (cheap: a couple of socket connects, no polling loops),
+     * restarts anything that died while the user still wants hosting:
+     *  - host process STOPPED/FAILED → start hosting again
+     *  - node server ports refusing connections → re-sync the `:node_server` process
+     * The tunnel has its own retry inside TunnelController; a dead tunnel process is
+     * covered by the host restart above.
+     */
+    private fun startWatchdog() {
+        watchdog?.cancel()
+        val g = graph
+        watchdog = scope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(60_000)
+                try {
+                    if (!g.settings.hostingWanted) continue
+                    val st = g.host.state.value.state
+                    if (st == ProcessState.STOPPED || st == ProcessState.FAILED) {
+                        LogBus.w(LogCategory.SYSTEM, "Watchdog: hosting wanted but state=$st — restarting")
+                        g.host.start(g.host.bootProject())
+                        continue
+                    }
+                    if (st == ProcessState.RUNNING) {
+                        val ports = ServerRuntime.wantedPorts(applicationContext)
+                        val dead = ports.any { !portAccepts(it) }
+                        if (dead) {
+                            LogBus.w(LogCategory.NODE, "Watchdog: a node server port is refusing — restarting server runtime")
+                            ServerHostService.sync(applicationContext)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    LogBus.w(LogCategory.SYSTEM, "Watchdog error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun portAccepts(port: Int): Boolean {
+        return try {
+            java.net.Socket().use { s ->
+                s.connect(java.net.InetSocketAddress("127.0.0.1", port), 1500)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun postNotification(n: android.app.Notification) {

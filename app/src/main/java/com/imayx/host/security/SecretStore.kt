@@ -21,6 +21,7 @@ class SecretStore(context: Context) {
     companion object {
         const val KEY_TUNNEL_TOKEN = "cf_tunnel_token"
         const val KEY_API_TOKEN = "cf_api_token"
+        const val KEY_GROQ_API_KEY = "groq_api_key"
         private const val KEYSTORE = "AndroidKeyStore"
         private const val ALIAS = "imayx_host_secrets_v1"
         private const val ENV_PREFIX = "node_env."
