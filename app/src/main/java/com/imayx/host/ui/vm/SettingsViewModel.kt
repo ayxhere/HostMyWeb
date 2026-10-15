@@ -19,6 +19,7 @@ import java.io.File
 data class SettingsUi(
     val theme: ThemeMode = ThemeMode.AMOLED,
     val port: Int = 3000,
+    val primaryPort: Int = 3000,
     val defaultProject: String = "",
     val defaultDomain: String = "",
     val projects: List<String> = emptyList(),
@@ -51,7 +52,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         val s = g.settings
         _ui.value = _ui.value.copy(
-            theme = s.themeMode, port = s.defaultPort, defaultProject = s.activeProject, defaultDomain = s.defaultDomain,
+            theme = s.themeMode, port = s.defaultPort, primaryPort = s.primaryPort,
+            defaultProject = s.activeProject, defaultDomain = s.defaultDomain,
             startOnBoot = s.startOnBoot, ayxBackend = s.ayxBackendEnabled, notifications = s.notificationsEnabled, autosave = s.autosave,
             cloudflaredUrl = s.cloudflaredUrl, nodeUrl = s.nodeRuntimeUrl,
             lockEnabled = g.appLock.isEnabled(), biometric = g.appLock.isBiometricEnabled()
@@ -81,6 +83,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setTheme(t: ThemeMode) { g.settings.themeMode = t; refresh() }
     fun setPort(p: Int) { g.settings.defaultPort = p; refresh() }
+    fun setPrimaryPort(p: Int) { g.settings.primaryPort = p; refresh() }
     fun setDefaultProject(n: String) { g.settings.activeProject = n; refresh() }
     fun setDefaultDomain(d: String) { g.settings.defaultDomain = d; refresh() }
     fun setStartOnBoot(v: Boolean) { g.settings.startOnBoot = v; refresh() }

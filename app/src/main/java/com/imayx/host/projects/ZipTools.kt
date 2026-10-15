@@ -20,7 +20,9 @@ data class ZipInfo(
     /** Extensions outside the supported web/media list (kept as-is, served as octet-stream). */
     val otherTypes: Set<String>,
     val unsafeEntries: List<String>,
-    val error: String?
+    val error: String?,
+    /** Normalized file entry names (junk skipped, capped) — used for server detection. */
+    val entryNames: List<String> = emptyList()
 ) {
     val isSafe: Boolean get() = error == null && unsafeEntries.isEmpty()
 }
@@ -53,6 +55,7 @@ object ZipTools {
     fun inspect(zip: File): ZipInfo {
         val unsafe = ArrayList<String>()
         val others = HashSet<String>()
+        val names = ArrayList<String>()
         var entries = 0
         var files = 0
         var total = 0L
@@ -77,6 +80,7 @@ object ZipTools {
                     if (isJunk(name)) continue
                     if (e.isDirectory) continue
                     files++
+                    if (names.size < 3000) names.add(name)
                     val size = if (e.size >= 0) e.size else 0L
                     total += size
                     if (total > MAX_TOTAL_BYTES) {
@@ -109,7 +113,7 @@ object ZipTools {
                 }
             }
         }
-        return ZipInfo(zip.length(), entries, files, total, hasIndex, strip, others, unsafe, null)
+        return ZipInfo(zip.length(), entries, files, total, hasIndex, strip, others, unsafe, null, names)
     }
 
     /**

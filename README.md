@@ -1,6 +1,9 @@
 # IMAYX Host v3
 
-Android hosting control panel (`com.imayx.host`): static HTTP server, optional Node runtime, real `cloudflared` tunnels, multi-project management, file manager, code editor, backups, app lock.
+Android hosting control panel (`com.imayx.host`): static HTTP server, one-tap
+Node.js **Server** projects on the built-in runtime (no download), optional
+external Node runtime, real `cloudflared` tunnels, multi-project management,
+file manager, code editor, backups, app lock.
 
 ## Build
 - Gradle 8.9, AGP 8.7.3, Kotlin 2.0.21, Java 17, compileSdk/targetSdk 35, minSdk 24.

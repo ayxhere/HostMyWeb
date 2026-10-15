@@ -1,5 +1,7 @@
 package com.imayx.host.domain
 
+import android.app.ActivityManager
+import android.content.Context
 import com.imayx.host.cloudflare.TunnelController
 import com.imayx.host.data.AppSettings
 import com.imayx.host.data.HostState
@@ -8,7 +10,9 @@ import com.imayx.host.data.LogCategory
 import com.imayx.host.data.ProcessState
 import com.imayx.host.data.ProjectConfig
 import com.imayx.host.data.ProjectStore
+import com.imayx.host.data.RuntimeType
 import com.imayx.host.data.TunnelMode
+import com.imayx.host.node.ServerRuntime
 import com.imayx.host.runtime.ProjectRuntime
 import com.imayx.host.runtime.RuntimeManager
 import com.imayx.host.runtime.RuntimeStartException
@@ -31,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
  *  4. start cloudflared  5. monitor  6. optional bounded auto-restart (never an infinite loop).
  */
 class HostController(
+    private val appContext: Context,
     private val settings: AppSettings,
     private val store: ProjectStore,
     private val runtimes: RuntimeManager,
@@ -59,6 +64,13 @@ class HostController(
     /** Projects running alongside the primary one (multi-start). Guarded by [extras] itself. */
     private val extras = LinkedHashMap<String, Pair<ProjectConfig, ProjectRuntime>>()
 
+    /**
+     * SERVER projects currently running on the embedded node (`:node_server`
+     * process). Guarded by itself. They are (re)started together through
+     * [ServerRuntime] — one tap runs them all.
+     */
+    private val serverProjects = LinkedHashMap<String, ProjectConfig>()
+
     private val runtimeRestarts = ArrayList<Long>()
     private val tunnelRestarts = ArrayList<Long>()
 
@@ -78,7 +90,25 @@ class HostController(
     fun pids(): List<Int> =
         (activeRuntime?.pids() ?: emptyList()) +
             synchronized(extras) { extras.values.map { it.second } }.flatMap { it.pids() } +
+            serverProcessPids() +
             tunnel.pids()
+
+    /** Pids of the `:node_server` process (own processes are visible to us). */
+    private fun serverProcessPids(): List<Int> {
+        return try {
+            val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            am.runningAppProcesses
+                ?.filter { it.processName == appContext.packageName + ":node_server" }
+                ?.map { it.pid }
+                ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /** The port a project effectively listens on: the primary one always uses the tunnel port. */
+    fun effectivePort(cfg: ProjectConfig, isPrimary: Boolean): Int =
+        if (isPrimary) settings.primaryPort else cfg.port
 
     /**
      * Starts several projects at once. The first one that comes up becomes the primary project
@@ -97,6 +127,13 @@ class HostController(
                     doStop()
                     return@withLock
                 }
+                val removedServer = synchronized(serverProjects) { serverProjects.remove(projectName) }
+                if (removedServer != null) {
+                    refreshServerRuntime()
+                    LogBus.i(LogCategory.SYSTEM, "Stopped server $projectName")
+                    publishExtras()
+                    return@withLock
+                }
                 val entry = synchronized(extras) { extras.remove(projectName) } ?: return@withLock
                 entry.second.onCrash = null
                 try {
@@ -110,8 +147,33 @@ class HostController(
     }
 
     private fun publishExtras() {
-        val names = synchronized(extras) { extras.keys.toList() }
+        val names = synchronized(extras) { extras.keys.toList() } +
+            synchronized(serverProjects) { serverProjects.keys.toList() }
         _state.value = _state.value.copy(extras = names)
+    }
+
+    /**
+     * (Re)builds the `:node_server` manifest from [serverProjects] and starts it,
+     * or stops the server process when nothing is left. One call restarts them all
+     * together — this is the "one tap runs every server" path.
+     * Returns a user-facing error when the servers could not be (re)started.
+     */
+    private fun refreshServerRuntime(): String? {
+        val specs = synchronized(serverProjects) { serverProjects.values.toList() }.map { cfg ->
+            val dir = store.projectDir(cfg.name)
+            val env = ServerRuntime.buildEnv(appContext, cfg.name, dir, secrets.getEnv(cfg.name))
+            ServerRuntime.ServerSpec(cfg.name, dir, cfg.entryFile, cfg.port, env)
+        }
+        if (specs.isEmpty()) {
+            ServerRuntime.stopServers(appContext)
+            return null
+        }
+        val err = ServerRuntime.startServers(appContext, specs)
+        if (err != null) {
+            LogBus.e(LogCategory.NODE, err)
+            _notices.tryEmit(err)
+        }
+        return err
     }
 
     private fun doStartMany(projectNames: List<String>) {
@@ -134,6 +196,20 @@ class HostController(
     }
 
     private fun startExtra(cfg: ProjectConfig) {
+        // SERVER projects share the single embedded node process — they are
+        // collected and (re)started together, not given their own runtime.
+        if (cfg.runtime == RuntimeType.SERVER) {
+            if (!ServerRuntime.isAvailable()) {
+                val msg = "${cfg.name}: embedded Node.js is not bundled in this build — server projects cannot start."
+                LogBus.e(LogCategory.SYSTEM, msg)
+                _notices.tryEmit(msg)
+                return
+            }
+            synchronized(serverProjects) { serverProjects[cfg.name] = cfg }
+            refreshServerRuntime()
+            LogBus.i(LogCategory.SYSTEM, "Started server ${cfg.name} on port ${cfg.port} (shared node process)")
+            return
+        }
         val rt = runtimes.create(cfg.runtime)
         val unavailable = rt.unavailableReason()
         if (unavailable != null) {
@@ -191,9 +267,19 @@ class HostController(
 
     private fun teardown() {
         stopExtras()
+        stopServerProjects()
         tunnel.stop()
         activeRuntime?.stop()
         activeRuntime = null
+    }
+
+    private fun stopServerProjects() {
+        val had = synchronized(serverProjects) {
+            val h = serverProjects.isNotEmpty()
+            serverProjects.clear()
+            h
+        }
+        if (had) ServerRuntime.stopServers(appContext)
     }
 
     private fun doStart(projectName: String?) {
@@ -213,30 +299,58 @@ class HostController(
         tunnelRestarts.clear()
         settings.hostingWanted = true
         settings.activeProject = cfg.name
-        activeConfig = cfg
-        _state.value = HostState(ProcessState.STARTING, cfg.name, cfg.runtime, cfg.port)
-        LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${cfg.runtime} port=${cfg.port}")
+        // The primary project ALWAYS binds the primary (tunnel) port — this is what
+        // the Cloudflare tunnel points at, so the public site can never 502 just
+        // because a project was imported with a different port.
+        val effective = cfg.copy(port = settings.primaryPort)
+        activeConfig = effective
+        _state.value = HostState(ProcessState.STARTING, cfg.name, cfg.runtime, effective.port)
+        LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${cfg.runtime} port=${effective.port}")
+
+        // SERVER primary: runs on the embedded node (:node_server process), no ProjectRuntime.
+        if (cfg.runtime == RuntimeType.SERVER) {
+            if (!ServerRuntime.isAvailable()) {
+                failStart(effective, "Embedded Node.js is not bundled in this build (libnode.so missing) — server projects cannot start.")
+                return
+            }
+            synchronized(serverProjects) { serverProjects[cfg.name] = effective }
+            val serverErr = refreshServerRuntime()
+            if (serverErr != null) {
+                synchronized(serverProjects) { serverProjects.remove(cfg.name) }
+                failStart(effective, serverErr)
+                return
+            }
+            activeRuntime = null
+            _state.value = HostState(ProcessState.RUNNING, cfg.name, cfg.runtime, effective.port, startedAt = System.currentTimeMillis())
+            LogBus.i(LogCategory.SYSTEM, "Server ${cfg.name} running on 127.0.0.1:${effective.port} (shared node process)")
+            if (cfg.cloudflareEnabled) {
+                startTunnel(effective)
+            } else {
+                LogBus.i(LogCategory.CLOUDFLARE, "Cloudflare disabled for this project; serving locally only")
+            }
+            return
+        }
 
         val rt = runtimes.forType(cfg.runtime)
         val unavailable = rt.unavailableReason()
         if (unavailable != null) {
-            failStart(cfg, unavailable)
+            failStart(effective, unavailable)
             return
         }
         try {
-            rt.start(cfg)
+            rt.start(effective)
         } catch (e: RuntimeStartException) {
-            failStart(cfg, e.message ?: "Runtime failed to start")
+            failStart(effective, e.message ?: "Runtime failed to start")
             return
         } catch (e: Exception) {
-            failStart(cfg, e.message ?: e.javaClass.simpleName)
+            failStart(effective, e.message ?: e.javaClass.simpleName)
             return
         }
         activeRuntime = rt
-        _state.value = HostState(ProcessState.RUNNING, cfg.name, cfg.runtime, cfg.port, startedAt = System.currentTimeMillis())
+        _state.value = HostState(ProcessState.RUNNING, cfg.name, cfg.runtime, effective.port, startedAt = System.currentTimeMillis())
 
         if (cfg.cloudflareEnabled) {
-            startTunnel(cfg)
+            startTunnel(effective)
         } else {
             LogBus.i(LogCategory.CLOUDFLARE, "Cloudflare disabled for this project; serving locally only")
         }

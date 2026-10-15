@@ -35,13 +35,87 @@ class ProjectManager(
 
     fun listInfo(): List<ProjectInfo> = list().map { info(it) }
 
-    /** First port at or above the default that no project uses (and not the embedded 3101/3102). */
+    /** First port at or above the default that no project uses (not the primary port, not the embedded 3101/3102). */
     fun nextFreePort(): Int {
-        val used = store.list().map { it.port }.toSet() + setOf(3101, 3102)
+        val used = store.list().map { it.port }.toSet() + setOf(3101, 3102, settings.primaryPort)
         var p = settings.defaultPort
         while (p in used) p++
         return p
     }
+
+    // ---- Server (Node.js) project support -------------------------------------------------------
+
+    /** Entry-point candidates, in preference order. */
+    private val serverEntryCandidates =
+        listOf("server.js", "src/server.js", "index.js", "src/index.js", "app.js", "src/app.js", "main.js")
+
+    /** File names that look like bundled secrets — never imported into a server project. */
+    private val secretFileNames = setOf(".env", "mail-key.json")
+
+    private fun isSecretFileName(name: String): Boolean {
+        val base = name.substringAfterLast('/')
+        return base in secretFileNames || base.endsWith(".key.json") || base.endsWith(".pem") ||
+            (base.startsWith(".env.") && !base.endsWith(".example"))
+    }
+
+    private fun isSafeRelative(p: String): Boolean =
+        p.isNotBlank() && !p.startsWith("/") && !p.split('/').contains("..") && '\u0000' !in p
+
+    /**
+     * Finds the Node.js entry file inside an extracted project directory.
+     * Order: package.json `scripts.start` ("node <file>") → package.json `main` → well-known candidates.
+     * Returns the path relative to [dir], or null when nothing looks runnable.
+     */
+    fun detectServerEntry(dir: File): String? {
+        val pkg = File(dir, "package.json")
+        if (pkg.isFile) {
+            try {
+                val json = org.json.JSONObject(pkg.readText())
+                val start = json.optJSONObject("scripts")?.optString("start").orEmpty()
+                val m = Regex("""node\s+([^\s'";]+)""").find(start)
+                val fromStart = m?.groupValues?.getOrNull(1)
+                if (fromStart != null && isSafeRelative(fromStart) && File(dir, fromStart).isFile) return fromStart
+                val main = json.optString("main").trim()
+                if (main.isNotEmpty() && isSafeRelative(main) && File(dir, main).isFile) return main
+            } catch (_: Exception) {
+            }
+        }
+        return serverEntryCandidates.firstOrNull { File(dir, it).isFile }
+    }
+
+    /** What the import dialog shows when a ZIP looks like a Node.js server. */
+    data class ServerDetection(
+        /** Entry file guess from the ZIP listing (confirmed against real files after extraction). */
+        val entryGuess: String,
+        val hasNodeModules: Boolean,
+        val skippedSecrets: List<String>
+    )
+
+    /**
+     * Quick pre-extraction analysis: does this ZIP look like a Node.js server?
+     * Names are relative to the would-be project root (strip prefix applied).
+     */
+    fun analyzeZipForServer(info: ZipInfo): ServerDetection? {
+        val rel = info.entryNames.map { n ->
+            if (info.stripPrefix.isNotEmpty() && n.startsWith(info.stripPrefix)) n.removePrefix(info.stripPrefix) else n
+        }.filter { it.isNotEmpty() }
+        if (rel.isEmpty()) return null
+        val set = rel.toSet()
+        val looksServer = "package.json" in set || serverEntryCandidates.any { it in set }
+        if (!looksServer) return null
+        val entryGuess = serverEntryCandidates.firstOrNull { it in set } ?: "server.js"
+        val hasModules = set.any { it == "node_modules" || it.startsWith("node_modules/") }
+        val skipped = rel.filter { '/' !in it && isSecretFileName(it) }.distinct().sorted()
+        return ServerDetection(entryGuess, hasModules, skipped)
+    }
+
+    /** Result of [importStaged]: the saved config plus human-readable import notes. */
+    data class ImportResult(
+        val config: ProjectConfig,
+        /** Detected server entry file, or null for static projects. */
+        val serverEntry: String?,
+        val warnings: List<String>
+    )
 
     private fun requireValidName(name: String) {
         if (!PathUtil.isValidProjectName(name)) {
@@ -154,7 +228,7 @@ class ProjectManager(
         return tmp to ZipTools.inspect(tmp)
     }
 
-    fun importStaged(zip: File, info: ZipInfo, name: String, onProgress: ((Int, Int) -> Unit)? = null): ProjectConfig {
+    fun importStaged(zip: File, info: ZipInfo, name: String, onProgress: ((Int, Int) -> Unit)? = null): ImportResult {
         requireValidName(name)
         if (!info.isSafe) {
             throw ProjectException(info.error ?: "ZIP contains unsafe paths and was rejected")
@@ -164,11 +238,44 @@ class ProjectManager(
         try {
             dir.mkdirs()
             val n = ZipTools.extract(zip, dir, info.stripPrefix, onProgress)
-            val cfg = ProjectConfig(name = name, port = nextFreePort())
+            val warnings = ArrayList<String>()
+
+            // Secret quarantine: real keys must live in the app's encrypted env store,
+            // never inside an imported project (which can be exported/shared as a ZIP).
+            val quarantined = ArrayList<String>()
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && isSecretFileName(f.name)) {
+                    quarantined.add(f.name)
+                    f.delete()
+                }
+            }
+            if (quarantined.isNotEmpty()) {
+                val msg = "Skipped secret file(s): ${quarantined.joinToString(", ")} — " +
+                    "put keys in Project → Settings → Environment secrets instead."
+                warnings.add(msg)
+                LogBus.w(LogCategory.SYSTEM, "Import $name: $msg")
+            }
+
+            // Server detection: a Node.js project becomes a SERVER project (built-in
+            // Node.js, one-tap start) instead of a static site.
+            val entry = detectServerEntry(dir)
+            val cfg = if (entry != null) {
+                if (File(dir, "package.json").isFile && !File(dir, "node_modules").isDirectory) {
+                    warnings.add(
+                        "node_modules not found in this ZIP — the server will fail to start until " +
+                            "its npm dependencies are included. Re-export the ZIP with node_modules " +
+                            "(production install) and re-import."
+                    )
+                }
+                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, entry=$entry)")
+                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = nextFreePort(), entryFile = entry)
+            } else {
+                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")
+                ProjectConfig(name = name, port = nextFreePort())
+            }
             store.save(cfg)
             if (settings.activeProject.isBlank()) settings.activeProject = name
-            LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")
-            return cfg
+            return ImportResult(cfg, entry, warnings)
         } catch (e: Exception) {
             dir.deleteRecursively()
             store.deleteConfig(name)

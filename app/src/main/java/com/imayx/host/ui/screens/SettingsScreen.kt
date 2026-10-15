@@ -68,6 +68,7 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
     LaunchedEffect(Unit) { cf.messages.collect { snack(it) } }
 
     var portText by remember(ui.port) { mutableStateOf(ui.port.toString()) }
+    var primaryPortText by remember(ui.primaryPort) { mutableStateOf(ui.primaryPort.toString()) }
     var domainText by remember(ui.defaultDomain) { mutableStateOf(ui.defaultDomain) }
     var cfUrl by remember(ui.cloudflaredUrl) { mutableStateOf(ui.cloudflaredUrl) }
     var nodeUrl by remember(ui.nodeUrl) { mutableStateOf(ui.nodeUrl) }
@@ -104,6 +105,14 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
             )
             IxButton("Save port", { portText.toIntOrNull()?.let { vm.setPort(it); snack("Port saved") } }, kind = BtnKind.Secondary,
                 enabled = (portText.toIntOrNull() ?: 0) in 1024..65535)
+            Spacer(Modifier.height(10.dp))
+            IxTextField(
+                primaryPortText, { primaryPortText = it.filter(Char::isDigit).take(5) }, "Primary port",
+                keyboardType = KeyboardType.Number,
+                supportingText = "1024–65535. The ACTIVE project always serves on this port — point your Cloudflare tunnel and public-hostname routes here. Restart hosting to apply."
+            )
+            IxButton("Save primary port", { primaryPortText.toIntOrNull()?.let { vm.setPrimaryPort(it); snack("Primary port saved — restart hosting to apply") } }, kind = BtnKind.Secondary,
+                enabled = (primaryPortText.toIntOrNull() ?: 0) in 1024..65535)
             Spacer(Modifier.height(10.dp))
             IxSelect("Default project", ui.defaultProject.ifBlank { "None" }, ui.projects.map { it to it }, { vm.setDefaultProject(it) }, enabled = ui.projects.isNotEmpty())
             Spacer(Modifier.height(10.dp))

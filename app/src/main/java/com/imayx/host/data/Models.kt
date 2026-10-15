@@ -1,6 +1,6 @@
 package com.imayx.host.data
 
-enum class RuntimeType { STATIC, NODE }
+enum class RuntimeType { STATIC, NODE, SERVER }
 
 enum class ProcessState { STOPPED, STARTING, RUNNING, FAILED }
 

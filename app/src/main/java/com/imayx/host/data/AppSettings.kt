@@ -42,6 +42,19 @@ class AppSettings(context: Context) {
             bump()
         }
 
+    /**
+     * The port the primary (active) project always binds to. The Cloudflare
+     * tunnel points here, so it must stay stable no matter how many projects
+     * are imported or which ports they were given. Secondary projects in a
+     * multi-start keep their own ports (which always skip this one).
+     */
+    var primaryPort: Int
+        get() = prefs.getInt("primary_port", 3000)
+        set(v) {
+            prefs.edit().putInt("primary_port", v.coerceIn(1024, 65535)).apply()
+            bump()
+        }
+
     /** Project used by Start Host when none is chosen explicitly. */
     var activeProject: String
         get() = prefs.getString("active_project", "") ?: ""

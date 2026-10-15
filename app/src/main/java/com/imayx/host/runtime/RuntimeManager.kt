@@ -168,8 +168,21 @@ class NodeRuntime(
     private var proc: ManagedProcess? = null
     private val lastLines = ArrayDeque<String>()
 
-    override fun unavailableReason(): String? =
-        if (installer.isInstalled()) null else "Node runtime not installed"
+    override fun unavailableReason(): String? {
+        val bin = installer.binary()
+            ?: return "Node runtime not installed"
+        // The bundled libnode.so is a shared library, not an executable — Android
+        // cannot run it as a child process. Only a real executable node binary
+        // works for NODE projects; for the built-in runtime use a Server project.
+        if (bin.name.endsWith(".so")) {
+            return "The built-in node library can't run NODE projects as a child process — " +
+                "change this project to the Server runtime (built-in Node.js, one tap) " +
+                "or install an executable ARM64 node binary in Settings → Node Runtime."
+        }
+        val probe = installer.probe()
+        return if (probe?.ok == true) null
+        else "Node runtime is installed but cannot run here: ${probe?.error ?: "unknown error"}"
+    }
 
     override fun start(project: ProjectConfig) {
         stop()
@@ -301,11 +314,15 @@ class RuntimeManager(
     fun forType(type: RuntimeType): ProjectRuntime = when (type) {
         RuntimeType.STATIC -> static
         RuntimeType.NODE -> node
+        // SERVER projects run on the embedded node (:node_server process) via
+        // ServerRuntime — they never go through a ProjectRuntime instance.
+        RuntimeType.SERVER -> throw IllegalArgumentException("SERVER projects are managed by ServerRuntime, not a ProjectRuntime")
     }
 
     /** A brand-new runtime instance, so several projects can run side by side (multi-start). */
     fun create(type: RuntimeType): ProjectRuntime = when (type) {
         RuntimeType.STATIC -> StaticRuntime(store)
         RuntimeType.NODE -> NodeRuntime(context, store, secrets, nodeInstaller, registry)
+        RuntimeType.SERVER -> throw IllegalArgumentException("SERVER projects are managed by ServerRuntime, not a ProjectRuntime")
     }
 }

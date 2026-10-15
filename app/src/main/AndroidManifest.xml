@@ -40,6 +40,19 @@
                 android:value="local_web_hosting_with_tunnel" />
         </service>
 
+        <!-- Embedded Node.js for SERVER projects. A separate OS process because
+             node::Start may run only once per process (the main process already
+             uses its call for the AyX backend + wish launcher). -->
+        <service
+            android:name=".service.ServerHostService"
+            android:exported="false"
+            android:process=":node_server"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local_node_server_runtime" />
+        </service>
+
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"

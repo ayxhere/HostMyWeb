@@ -36,7 +36,9 @@ data class ImportStage(
     val file: File,
     val info: ZipInfo,
     val sourceName: String,
-    val suggestedName: String
+    val suggestedName: String,
+    /** Set when the ZIP looks like a Node.js server (pre-extraction guess). */
+    val detection: ProjectManager.ServerDetection?
 )
 
 class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
@@ -78,6 +80,12 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun nodeInstalled(): Boolean = g.nodeInstaller.isInstalled()
+
+    /** The port the primary (active) project always binds to — the tunnel target. */
+    fun primaryPort(): Int = g.settings.primaryPort
+
+    /** True when the built-in Node.js (libnode.so) is bundled and SERVER projects can run. */
+    fun serverAvailable(): Boolean = com.imayx.host.node.ServerRuntime.isAvailable()
 
     // ---- one-off node scripts (backend setup) ----------------------------------------------------
 
@@ -239,7 +247,10 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val stage = withContext(Dispatchers.IO) {
                     val (file, info) = g.projects.stageZip(uri)
-                    ImportStage(file, info, g.projects.displayName(uri), g.projects.suggestName(uri))
+                    ImportStage(
+                        file, info, g.projects.displayName(uri), g.projects.suggestName(uri),
+                        g.projects.analyzeZipForServer(info)
+                    )
                 }
                 _stage.value = stage
             } catch (e: Exception) {
@@ -260,14 +271,23 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = "Importing…", progress = 0f)
             try {
-                withContext(Dispatchers.IO) {
+                val result = withContext(Dispatchers.IO) {
                     g.projects.importStaged(st.file, st.info, name) { done, total ->
                         if (total > 0) _ui.value = _ui.value.copy(progress = done.toFloat() / total)
                     }
                 }
                 _stage.value = null
-                _imported.value = name
-                _messages.emit("Project ready")
+                _imported.value = result.config.name
+                for (w in result.warnings) _messages.emit(w)
+                if (result.config.runtime == RuntimeType.SERVER) {
+                    _messages.emit(
+                        "Server \"${result.config.name}\" ready (entry: ${result.config.entryFile}, " +
+                            "port ${result.config.port}). " +
+                            "Add API keys in Settings → Environment secrets, then tap Start Hosting."
+                    )
+                } else {
+                    _messages.emit("Project ready")
+                }
             } catch (e: Exception) {
                 _messages.emit(e.message ?: "Import failed")
             } finally {
@@ -290,14 +310,21 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     /** Multi-start: hosts every selected project at the same time (replaces what was running). */
     fun startSelected(names: List<String>) {
         if (names.isEmpty()) return
-        // Two projects on the same port can never run together: tell the user which ones.
         val picked = _ui.value.items.map { it.config }.filter { it.name in names }
-        val clash = picked.groupBy { it.port }.filter { it.value.size > 1 }
+        // Mirror HostController.doStartMany: the first Cloudflare-enabled project becomes the
+        // primary and always binds the primary (tunnel) port; the rest keep their own ports.
+        // Two projects on the same EFFECTIVE port can never run together — name them.
+        val primary = picked.sortedByDescending { it.cloudflareEnabled }.firstOrNull()
+        val effPorts = picked.associate { it.name to if (it.name == primary?.name) g.settings.primaryPort else it.port }
+        val clash = effPorts.entries.groupBy({ it.value }, { it.key }).filter { it.value.size > 1 }
         if (clash.isNotEmpty()) {
             val msg = clash.entries.joinToString("; ") { (port, list) ->
-                list.joinToString(" + ") { it.name } + " share port $port"
+                list.joinToString(" + ") + " would share port $port"
             }
-            _messages.tryEmit("$msg. Change a port in Settings of one project first.")
+            _messages.tryEmit(
+                "$msg. Change a port in Project Settings first " +
+                    "(the primary project always uses port ${g.settings.primaryPort})."
+            )
             return
         }
         g.projects.setActive(names.first())

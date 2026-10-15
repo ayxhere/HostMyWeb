@@ -185,14 +185,20 @@ fun ProjectsScreen(
                     }
                 }
                 items(ui.items, key = { it.config.name }) { info ->
+                    val isPrimary = host.project == info.config.name
+                    val hostedState = when {
+                        isPrimary -> host.state
+                        info.config.name in host.extras && host.state == ProcessState.RUNNING -> ProcessState.RUNNING
+                        else -> ProcessState.STOPPED
+                    }
+                    // The primary project always serves on the primary (tunnel) port while running.
+                    val effPort = if (isPrimary && hostedState != ProcessState.STOPPED) vm.primaryPort() else info.config.port
                     ProjectCard(
                         info = info,
                         isActive = vm.activeProject == info.config.name,
-                        hostedState = when {
-                            host.project == info.config.name -> host.state
-                            info.config.name in host.extras && host.state == ProcessState.RUNNING -> ProcessState.RUNNING
-                            else -> ProcessState.STOPPED
-                        },
+                        isPrimary = isPrimary,
+                        effPort = effPort,
+                        hostedState = hostedState,
                         selecting = selecting,
                         selected = info.config.name in selected,
                         onToggle = {
@@ -202,7 +208,7 @@ fun ProjectsScreen(
                         onStart = { vm.startHosting(info.config.name) },
                         onStop = { vm.stopHosting(info.config.name) },
                         onSettings = { configFor = info.config },
-                        onPreview = { onPreview("http://127.0.0.1:${info.config.port}/") },
+                        onPreview = { onPreview("http://127.0.0.1:$effPort/") },
                         onSetActive = { vm.setActive(info.config.name) },
                         onRename = { renameFor = info.config.name },
                         onDuplicate = { duplicateFor = info.config.name },
@@ -277,6 +283,7 @@ fun ProjectsScreen(
         ConfigDialog(
             cfg = cfg,
             nodeInstalled = vm.nodeInstalled(),
+            serverAvailable = vm.serverAvailable(),
             onDismiss = { configFor = null },
             onSave = {
                 vm.saveConfig(it)
@@ -369,6 +376,8 @@ fun ProjectsScreen(
 private fun ProjectCard(
     info: ProjectInfo,
     isActive: Boolean,
+    isPrimary: Boolean,
+    effPort: Int,
     hostedState: ProcessState,
     selecting: Boolean,
     selected: Boolean,
@@ -399,7 +408,13 @@ private fun ProjectCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(cfg.name, color = c.text, style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
-                    StatusPill(cfg.runtime.name, c.accent)
+                    StatusPill(
+                        when (cfg.runtime) {
+                            RuntimeType.STATIC -> "STATIC"
+                            RuntimeType.NODE -> "NODE"
+                            RuntimeType.SERVER -> "SERVER"
+                        }, c.accent
+                    )
                     if (isActive) StatusPill("ACTIVE", c.ok)
                 }
             }
@@ -426,7 +441,11 @@ private fun ProjectCard(
         KeyValueRow("Files", info.fileCount.toString())
         KeyValueRow("Modified", Fmt.date(info.lastModified))
         KeyValueRow("Hosting", if (hostedState == ProcessState.STOPPED) "Idle" else hostStatusText(hostedState), valueColor = hostStatusColor(hostedState))
-        KeyValueRow("Port", cfg.port.toString(), mono = true)
+        KeyValueRow(
+            "Port",
+            if (isPrimary && hostedState != ProcessState.STOPPED) "$effPort (primary — tunnel target)" else effPort.toString(),
+            mono = true
+        )
         KeyValueRow("Domain", cfg.domain.ifBlank { "Not set" }, valueColor = if (cfg.domain.isBlank()) c.soft else c.text)
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -467,13 +486,21 @@ private fun CreateProjectDialog(onDismiss: () -> Unit, onCreate: (String, Runtim
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     IxChip("Static site", runtime == RuntimeType.STATIC, { runtime = RuntimeType.STATIC })
                     IxChip("Node.js", runtime == RuntimeType.NODE, { runtime = RuntimeType.NODE })
+                    IxChip("Server", runtime == RuntimeType.SERVER, { runtime = RuntimeType.SERVER })
                 }
-                if (runtime == RuntimeType.NODE) {
-                    Text(
+                when (runtime) {
+                    RuntimeType.NODE -> Text(
                         "Node projects need an Android-compatible ARM64 Node runtime (Settings → Node Runtime).",
                         color = c.soft,
                         style = MaterialTheme.typography.bodySmall
                     )
+                    RuntimeType.SERVER -> Text(
+                        "Server projects run on the built-in Node.js — no download needed. " +
+                            "One tap starts all servers together.",
+                        color = c.soft,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    else -> {}
                 }
             }
         },
@@ -557,6 +584,31 @@ private fun ImportDialog(
                     if (info.hasIndexHtml) "Found" else "Not found",
                     valueColor = if (info.hasIndexHtml) c.ok else c.warn
                 )
+                stage.detection?.let { d ->
+                    KeyValueRow("Type", "Server (Node.js) — auto-detected", valueColor = c.ok)
+                    KeyValueRow("Entry", d.entryGuess, mono = true)
+                    KeyValueRow(
+                        "node_modules",
+                        if (d.hasNodeModules) "Included" else "MISSING",
+                        valueColor = if (d.hasNodeModules) c.ok else c.warn
+                    )
+                    if (!d.hasNodeModules) {
+                        Text(
+                            "This ZIP has no node_modules — the server will fail to start until its npm " +
+                                "dependencies are included. Re-export with node_modules and re-import.",
+                            color = c.warn,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (d.skippedSecrets.isNotEmpty()) {
+                        Text(
+                            "Secrets skipped on import: ${d.skippedSecrets.joinToString(", ")} — add keys " +
+                                "in Project → Settings → Environment secrets instead.",
+                            color = c.warn,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
                 if (info.stripPrefix.isNotEmpty()) {
                     Text("The top-level folder \"${info.stripPrefix.trimEnd('/')}\" will be flattened.", color = c.soft, style = MaterialTheme.typography.bodySmall)
                 }
@@ -598,6 +650,7 @@ private fun ImportDialog(
 private fun ConfigDialog(
     cfg: ProjectConfig,
     nodeInstalled: Boolean,
+    serverAvailable: Boolean,
     onDismiss: () -> Unit,
     onSave: (ProjectConfig) -> Unit,
     onEnv: () -> Unit,
@@ -623,7 +676,9 @@ private fun ConfigDialog(
     val domainClean = cleanDomain(domain)
     val domainErr = if (domainClean.isNotEmpty() && !isValidHostname(domainClean)) "Enter a valid hostname, e.g. example.com" else null
     val rootErr = if (rootDir.contains("..") || rootDir.startsWith("/")) "Must be a relative folder inside the project" else null
-    val entryErr = if (runtime == RuntimeType.NODE && (entry.isBlank() || entry.contains("..") || entry.startsWith("/"))) "Relative file inside the project" else null
+    val entryErr = if ((runtime == RuntimeType.NODE || runtime == RuntimeType.SERVER) &&
+        (entry.isBlank() || entry.contains("..") || entry.startsWith("/"))
+    ) "Relative file inside the project" else null
     val valid = portErr == null && domainErr == null && rootErr == null && entryErr == null
 
     AlertDialog(
@@ -641,14 +696,32 @@ private fun ConfigDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     IxChip("STATIC", runtime == RuntimeType.STATIC, { runtime = RuntimeType.STATIC })
                     IxChip("NODE", runtime == RuntimeType.NODE, { runtime = RuntimeType.NODE })
+                    IxChip("SERVER", runtime == RuntimeType.SERVER, { runtime = RuntimeType.SERVER })
                 }
                 if (runtime == RuntimeType.NODE && !nodeInstalled) {
                     Text("Node runtime not installed", color = c.warn, style = MaterialTheme.typography.bodySmall)
                 }
-                IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr, keyboardType = KeyboardType.Number)
+                if (runtime == RuntimeType.SERVER && !serverAvailable) {
+                    Text(
+                        "Built-in Node.js is not bundled in this build — server projects cannot start",
+                        color = c.warn,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "Used when this project runs alongside others. The ACTIVE project always uses the primary port (Settings).", keyboardType = KeyboardType.Number)
                 if (runtime == RuntimeType.STATIC) {
                     IxTextField(rootDir, { rootDir = it.trim() }, "Root directory (optional)", placeholder = "e.g. dist", isError = rootErr != null, supportingText = rootErr ?: "Sub-folder that is served. Empty = project root.")
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
+                } else if (runtime == RuntimeType.SERVER) {
+                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically.")
+                    IxButton("Environment secrets…", onClick = onEnv, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "Runs on the built-in Node.js in a shared process — no download needed, one tap " +
+                            "starts all servers together. SESSION_SECRET is auto-generated; add API keys " +
+                            "(e.g. RESEND_API_KEY) in Environment secrets above. The ZIP must include node_modules.",
+                        color = c.soft,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 } else {
                     IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr)
                     IxTextField(args, { args = it }, "Arguments (optional)")
