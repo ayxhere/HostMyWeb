@@ -235,6 +235,56 @@ object AiFixer {
             l.contains("error") || l.contains("uncaught") || l.contains("failed to start") || l.contains("did not open")
         }?.substringAfter("[server-host] ")?.take(300).orEmpty()
 
+    /**
+     * "AI read" detection: when the scanner finds no server (unusual layout), Groq reads the file tree and
+     * every package.json and says which folders are servers. Answers are validated against real files.
+     */
+    suspend fun detectServers(
+        ctx: android.content.Context,
+        settings: AppSettings,
+        secrets: SecretStore,
+        root: File
+    ): List<com.imayx.host.projects.ServerScanner.Found> = withContext(Dispatchers.IO) {
+        val key = secrets.get(SecretStore.KEY_GROQ_API_KEY)
+        if (key.isNullOrBlank() || !root.isDirectory) return@withContext emptyList()
+        try {
+            val tree = fileTree(root)
+            val pk = StringBuilder()
+            var n = 0
+            root.walkTopDown().maxDepth(4)
+                .onEnter { it.name != "node_modules" && it.name != ".git" }
+                .filter { it.isFile && it.name == "package.json" }
+                .forEach {
+                    if (n++ < 8) pk.append("--- ").append(it.relativeTo(root).path).append(" ---\n")
+                        .append(readTextCapped(it, 1500)).append('\n')
+                }
+            val sys = """
+You inspect a ZIP of Node.js code and list every independent HTTP server inside it.
+Each server is one folder with one entry file (plain JavaScript run with `node`, .js/.mjs/.cjs only).
+Reply STRICT JSON only: {"servers":[{"dir":"relative/folder or empty string for the root","entry":"file relative to dir"}],"note":"short"}
+Never include node_modules, tests, frontends without a server, or build output. Paths must exist in the tree and never contain "..".
+""".trimIndent()
+            val reply = chat(key, settings.aiModel, sys, "File tree:\n$tree\n\npackage.json files:\n$pk")
+            val st = reply.indexOf('{'); val en = reply.lastIndexOf('}')
+            val arr = JSONObject(if (st >= 0 && en > st) reply.substring(st, en + 1) else reply).optJSONArray("servers") ?: JSONArray()
+            val out = ArrayList<com.imayx.host.projects.ServerScanner.Found>()
+            for (i in 0 until minOf(arr.length(), 12)) {
+                val o = arr.optJSONObject(i) ?: continue
+                val dir = o.optString("dir", "").trim().trim('/')
+                val entry = o.optString("entry", "").trim().trimStart('/')
+                if (dir.contains("..") || entry.contains("..") || entry.isBlank()) continue
+                if (!(entry.endsWith(".js") || entry.endsWith(".mjs") || entry.endsWith(".cjs"))) continue
+                if (!File(if (dir.isEmpty()) root else File(root, dir), entry).isFile) continue
+                if (out.none { it.dir == dir }) out.add(com.imayx.host.projects.ServerScanner.Found(dir, entry))
+            }
+            LogBus.i(LogCategory.NODE, "AI detect: ${out.size} server(s) " + out.joinToString { "${it.dir.ifEmpty { "(root)" }}/${it.entry}" })
+            out
+        } catch (e: Exception) {
+            LogBus.e(LogCategory.NODE, "AI detect failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ------------------------------------------------------------------ prompt
 
     private val SYSTEM_PROMPT = """

@@ -297,7 +297,11 @@ class ProjectManager(
                     )
                 }
                 LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, entry=$entry)")
-                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = nextFreePort(), entryFile = entry)
+                val one = com.imayx.host.data.ServerDef(
+                    name = PathUtil.sanitizeProjectName(name).lowercase().take(32), dir = "", entry = entry,
+                    port = settings.primaryPort, subdomain = "", enabled = true, primary = true
+                )
+                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = nextFreePort(), entryFile = entry, servers = listOf(one))
             } else {
                 LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")
                 ProjectConfig(name = name, port = nextFreePort())
@@ -326,10 +330,10 @@ class ProjectManager(
      * Re-detects the servers of an existing SERVER project (after the user edited/added folders).
      * Keeps name/subdomain/port/enabled of servers that still exist (matched by folder).
      */
-    fun rescanServers(name: String): ProjectConfig {
+    fun rescanServers(name: String, override: List<ServerScanner.Found>? = null): ProjectConfig {
         val cfg = store.get(name) ?: throw ProjectException("Project not found")
         val dir = store.projectDir(name)
-        val found = ServerScanner.scan(dir)
+        val found = override ?: ServerScanner.scan(dir)
         if (found.isEmpty()) throw ProjectException("No Node.js server found in this project")
         val fresh = buildDefs(name, found)
         val merged = fresh.map { f ->

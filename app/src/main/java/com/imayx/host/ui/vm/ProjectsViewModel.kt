@@ -294,6 +294,15 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 } else {
                     _messages.emit("Project ready")
+                    val hasPkg = withContext(Dispatchers.IO) {
+                        g.projectStore.projectDir(result.config.name).walkTopDown().maxDepth(4)
+                            .onEnter { it.name != "node_modules" }
+                            .any { it.isFile && it.name == "package.json" }
+                    }
+                    if (hasPkg && com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
+                        _messages.emit("package.json found but no server detected — asking AI to read the project…")
+                        rescanServers(result.config.name, useAi = true)
+                    }
                 }
             } catch (e: Exception) {
                 _messages.emit(e.message ?: "Import failed")
@@ -304,15 +313,42 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Re-detect the servers (and ports) of a SERVER project after its folders changed. */
-    fun rescanServers(name: String) {
+    /**
+     * Re-detect the servers (and ports) of a project. The normal scanner runs first; when it finds nothing
+     * (or [useAi] is set) Groq reads the file tree and package.json files and names the servers.
+     */
+    fun rescanServers(name: String, useAi: Boolean = false) {
         viewModelScope.launch {
+            _ui.value = _ui.value.copy(busy = "Scanning $name…")
             try {
-                val cfg = withContext(Dispatchers.IO) { g.projects.rescanServers(name) }
+                var cfg: ProjectConfig? = null
+                if (!useAi) {
+                    cfg = try {
+                        withContext(Dispatchers.IO) { g.projects.rescanServers(name) }
+                    } catch (_: com.imayx.host.projects.ProjectException) {
+                        null
+                    }
+                }
+                if (cfg == null) {
+                    if (!com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
+                        _messages.emit("No server found. Add a Groq API key (Settings → AI auto-fix), then use Detect servers (AI).")
+                        return@launch
+                    }
+                    _ui.value = _ui.value.copy(busy = "AI reading $name…")
+                    val found = com.imayx.host.ai.AiFixer.detectServers(
+                        getApplication<Application>(), g.settings, g.secrets, g.projectStore.projectDir(name)
+                    )
+                    if (found.isEmpty()) {
+                        _messages.emit("AI also found no Node.js server in $name. Check the folder in Files.")
+                        return@launch
+                    }
+                    cfg = withContext(Dispatchers.IO) { g.projects.rescanServers(name, found) }
+                }
                 _messages.emit("$name: ${cfg.servers.size} server(s) — " + cfg.servers.joinToString { "${it.name} :${it.port}" })
             } catch (e: Exception) {
-                _messages.emit(e.message ?: "Rescan failed")
+                if (e !is CancellationException) _messages.emit(e.message ?: "Scan failed")
             } finally {
+                _ui.value = _ui.value.copy(busy = null)
                 refresh()
             }
         }

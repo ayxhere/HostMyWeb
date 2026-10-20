@@ -21,13 +21,16 @@ object ServerScanner {
     data class Found(val dir: String, val entry: String)
 
     private val entryCandidates =
-        listOf("server.js", "src/server.js", "index.js", "src/index.js", "app.js", "src/app.js", "main.js")
+        listOf(
+            "server.js", "src/server.js", "index.js", "src/index.js", "app.js", "src/app.js", "main.js", "src/main.js",
+            "server.mjs", "index.mjs", "app.mjs", "src/server.mjs", "src/index.mjs", "api.js", "bin/www"
+        )
     private val skipDirs = setOf(
         "node_modules", ".git", ".github", "dist", "build", "public", "assets", "static", "uploads",
         "data", "tests", "test", "docs", "scripts", "db", "migrations", "coverage", ".next", "__MACOSX"
     )
     private val primaryNames = setOf("web", "www", "main", "site", "app", "frontend", "root", "home")
-    private const val MAX_DEPTH = 3
+    private const val MAX_DEPTH = 4
 
     /** Real-file scan (after extraction). */
     fun scan(root: File): List<Found> {
@@ -71,14 +74,32 @@ object ServerScanner {
             try {
                 val json = JSONObject(pkg.readText())
                 val start = json.optJSONObject("scripts")?.optString("start").orEmpty()
-                val m = Regex("""node\s+([^\s'";]+)""").find(start)?.groupValues?.getOrNull(1)
+                val m = Regex("""(?:node|nodemon|bun)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s'";&|]+\.(?:m?js|cjs))""")
+                    .find(start)?.groupValues?.getOrNull(1)
                 if (m != null && safe(m) && File(dir, m).isFile) return m
                 val main = json.optString("main").trim()
                 if (main.isNotEmpty() && safe(main) && File(dir, main).isFile) return main
             } catch (_: Exception) {
             }
         }
-        return entryCandidates.firstOrNull { File(dir, it).isFile }
+        entryCandidates.firstOrNull { File(dir, it).isFile }?.let { return it }
+        // Last resort for folders that have a package.json: any top-level .js that calls listen().
+        if (pkg.isFile) return entryByListen(dir)
+        return null
+    }
+
+    private fun entryByListen(dir: File): String? {
+        val files = ArrayList<String>()
+        dir.listFiles()?.filter { it.isFile }?.forEach { files.add(it.name) }
+        File(dir, "src").listFiles()?.filter { it.isFile }?.forEach { files.add("src/" + it.name) }
+        return files.sorted().firstOrNull { n ->
+            (n.endsWith(".js") || n.endsWith(".mjs") || n.endsWith(".cjs")) && try {
+                val t = File(dir, n).readText().take(60_000)
+                t.contains(".listen(")
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     /** ZIP-listing scan (before extraction). [names] are paths relative to the would-be project root. */

@@ -296,7 +296,11 @@ fun ProjectsScreen(
                 gate.request(lock) { envFor = cfg.name }
             },
             onCreateAdmin = { u, p -> vm.createBackendAdmin(cfg.name, u, p) },
-            onRunScript = { cmd -> vm.runNodeCommandLine(cfg.name, cmd) }
+            onRunScript = { cmd -> vm.runNodeCommandLine(cfg.name, cmd) },
+            onDetectAi = {
+                configFor = null
+                vm.rescanServers(cfg.name, useAi = true)
+            }
         )
     }
 
@@ -691,9 +695,11 @@ private fun ConfigDialog(
     onSave: (ProjectConfig) -> Unit,
     onEnv: () -> Unit,
     onCreateAdmin: (String, String) -> Unit,
-    onRunScript: (String) -> Unit
+    onRunScript: (String) -> Unit,
+    onDetectAi: () -> Unit = {}
 ) {
     val c = Ix.c
+    var servers by remember { mutableStateOf(cfg.servers) }
     var runtime by remember { mutableStateOf(cfg.runtime) }
     var port by remember { mutableStateOf(cfg.port.toString()) }
     var rootDir by remember { mutableStateOf(cfg.rootDir) }
@@ -715,7 +721,15 @@ private fun ConfigDialog(
     val entryErr = if ((runtime == RuntimeType.NODE || runtime == RuntimeType.SERVER) &&
         (entry.isBlank() || entry.contains("..") || entry.startsWith("/"))
     ) "Relative file inside the project" else null
-    val valid = portErr == null && domainErr == null && rootErr == null && entryErr == null
+    val active = servers.filter { it.enabled }
+    val srvErr = when {
+        runtime != RuntimeType.SERVER || servers.isEmpty() -> null
+        servers.any { it.port !in 1024..65535 } -> "Every server port must be 1024–65535"
+        active.map { it.port }.toSet().size != active.size -> "Two servers use the same port"
+        active.map { it.subdomain }.filter { it.isNotBlank() }.let { it.toSet().size != it.size } -> "Two servers use the same subdomain"
+        else -> null
+    }
+    val valid = portErr == null && domainErr == null && rootErr == null && entryErr == null && srvErr == null
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -744,12 +758,46 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "Used when this project runs alongside others. The ACTIVE project always uses the primary port (Settings).", keyboardType = KeyboardType.Number)
+                if (!(runtime == RuntimeType.SERVER && servers.isNotEmpty())) IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "Used when this project runs alongside others. The ACTIVE project always uses the primary port (Settings).", keyboardType = KeyboardType.Number)
                 if (runtime == RuntimeType.STATIC) {
                     IxTextField(rootDir, { rootDir = it.trim() }, "Root directory (optional)", placeholder = "e.g. dist", isError = rootErr != null, supportingText = rootErr ?: "Sub-folder that is served. Empty = project root.")
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
                 } else if (runtime == RuntimeType.SERVER) {
-                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically.")
+                    if (servers.isEmpty()) {
+                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically.")
+                    } else {
+                        Text("Servers in this project (${servers.size})", color = c.soft, style = MaterialTheme.typography.labelMedium)
+                        servers.forEachIndexed { i, sv ->
+                            val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
+                            SwitchRow(
+                                "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
+                                sv.enabled,
+                                { v -> servers = servers.toMutableList().also { it[i] = sv.copy(enabled = v) } },
+                                subtitle = where
+                            )
+                            if (sv.enabled) {
+                                IxTextField(
+                                    sv.port.toString(),
+                                    { v -> servers = servers.toMutableList().also { it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0) } },
+                                    "Port",
+                                    keyboardType = KeyboardType.Number,
+                                    isError = sv.port !in 1024..65535,
+                                    supportingText = if (sv.primary) "Main server: uses the tunnel port while hosted" else null
+                                )
+                                if (!sv.primary) {
+                                    IxTextField(
+                                        sv.subdomain,
+                                        { v -> servers = servers.toMutableList().also { it[i] = sv.copy(subdomain = v.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '-' }.take(40)) } },
+                                        "Subdomain",
+                                        placeholder = "api",
+                                        supportingText = if (sv.subdomain.isBlank()) "Empty = no route" else sv.subdomain + "." + domainClean.ifBlank { "<domain>" }
+                                    )
+                                }
+                            }
+                        }
+                        if (srvErr != null) Text(srvErr, color = c.danger, style = MaterialTheme.typography.bodySmall)
+                    }
+                    IxButton("Detect servers (AI)", onClick = onDetectAi, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     IxButton("Environment secrets…", onClick = onEnv, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     Text(
                         "Runs on the built-in Node.js in a shared process — no download needed, one tap " +
@@ -804,7 +852,8 @@ private fun ConfigDialog(
                             autoStart = autoStart,
                             autoRestart = autoRestart,
                             entryFile = entry.ifBlank { "server.js" },
-                            nodeArgs = args.trim()
+                            nodeArgs = args.trim(),
+                            servers = servers
                         )
                     )
                 },

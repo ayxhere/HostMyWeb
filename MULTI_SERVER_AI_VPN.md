@@ -32,3 +32,12 @@ Other routes (apex imayx.in) untouched. Domain = project domain, else Settings d
   (listen() at startup is fine). `process.chdir` ends in the last server's folder.
 - A restart after an AI fix restarts all servers.
 - Not compiled here (no Kotlin/Android SDK in this sandbox): build in AndroidIDE and paste any error.
+
+## v4.1
+- Scanner: more entry names (src/main.js, *.mjs, bin/www, api.js), `nodemon`/`bun` start scripts, workspace roots,
+  depth 4, and a `.listen()` fallback for folders with package.json.
+- A single detected server is now also a `Server 1` entry (legacy projects show in the list).
+- AI read: `AiFixer.detectServers()` — Groq reads the tree + package.json files and names the servers.
+  Runs automatically when a ZIP has package.json but no server was found, on Rescan with no result,
+  and from Project settings -> "Detect servers (AI)". Needs a Groq key.
+- Project settings dialog: per-server enable switch, port, subdomain (duplicate checks).
