@@ -40,7 +40,14 @@ object ServerRuntime {
         val dir: File,
         val entry: String,
         val port: Int,
-        val env: Map<String, String>
+        val env: Map<String, String>,
+        /** Owning project (folder under projects/). For multi-server projects [name] is "project/server". */
+        val project: String = name,
+        val serverName: String = name,
+        /** Project root; node_modules may live here instead of next to the server folder. */
+        val projectRoot: File = dir,
+        /** Subdomain label for Cloudflare routing ("" = apex/primary, null = none). */
+        val subdomain: String? = null
     )
 
     fun isAvailable(): Boolean = NodeBridge.available
@@ -58,7 +65,9 @@ object ServerRuntime {
         if (!isSafeRelative(spec.entry) || !entry.isFile) {
             return "${spec.name}: entry file \"${spec.entry}\" not found — fix it in Project → Settings"
         }
-        if (File(spec.dir, "package.json").isFile && !File(spec.dir, "node_modules").isDirectory) {
+        if (File(spec.dir, "package.json").isFile &&
+            !com.imayx.host.projects.ServerScanner.hasNodeModules(spec.projectRoot, spec.dir)
+        ) {
             return "${spec.name}: node_modules is missing — the server cannot start without its " +
                 "npm dependencies. Re-export the ZIP with node_modules (production install) and re-import."
         }
@@ -128,6 +137,28 @@ object ServerRuntime {
         } catch (e: Exception) {
             "Could not start server runtime: ${e.message ?: e.javaClass.simpleName}"
         }
+    }
+
+    /**
+     * Real restart. `node::Start` runs once per OS process, so a plain [startServers] while the
+     * process is alive does NOT reload code. We stop (process is killed), wait until it is really
+     * gone, then start again with the new manifest.
+     */
+    fun restartServers(ctx: Context, specs: List<ServerSpec>): String? {
+        stopServers(ctx)
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val name = ctx.packageName + ":node_server"
+        val t0 = System.currentTimeMillis()
+        while (System.currentTimeMillis() - t0 < 4000) {
+            val alive = try {
+                am.runningAppProcesses?.any { it.processName == name } == true
+            } catch (_: Exception) {
+                false
+            }
+            if (!alive) break
+            try { Thread.sleep(200) } catch (_: InterruptedException) { break }
+        }
+        return startServers(ctx, specs)
     }
 
     /** Stops the `:node_server` process (its manifest is removed first). */
@@ -225,8 +256,8 @@ object ServerRuntime {
             |  const orig = process.exit.bind(process);
             |  return (code) => { log('[server-host] process.exit(' + code + ') blocked'); };
             |})();
-            |process.on('uncaughtException', (e) => log('[server-host] uncaught: ' + (e?.message || e)));
-            |process.on('unhandledRejection', (e) => log('[server-host] unhandled rejection: ' + (e?.message || e)));
+            |process.on('uncaughtException', (e) => log('[server-host] uncaught: ' + String(e?.stack || e?.message || e).slice(0, 900).replace(/\n/g, ' | ')));
+            |process.on('unhandledRejection', (e) => log('[server-host] unhandled rejection: ' + String(e?.stack || e?.message || e).slice(0, 900).replace(/\n/g, ' | ')));
             |
             |// process.env is process-global, so servers are started strictly one at a time and
             |// the next import only happens after the current server's port accepts connections.
@@ -260,7 +291,7 @@ object ServerRuntime {
             |      ? '[server-host] ' + s.name + ' running on :' + s.port
             |      : '[server-host] ' + s.name + ' did NOT open :' + s.port + ' within 20s');
             |  } catch (e) {
-            |    log('[server-host] ' + s.name + ' failed to start: ' + (e?.stack || e?.message || e));
+            |    log('[server-host] ' + s.name + ' failed to start: ' + String(e?.stack || e?.message || e).slice(0, 900).replace(/\n/g, ' | '));
             |  }
             |}
             |
@@ -282,6 +313,32 @@ object ServerRuntime {
             tail.toString(Charsets.UTF_8)
         } catch (e: Exception) {
             "(could not read server log: ${e.message})"
+        }
+    }
+
+    /** Size of servers.log (monitor starts reading from here). */
+    fun logSize(ctx: Context): Long = try { File(serversDir(ctx), "servers.log").length() } catch (_: Exception) { 0L }
+
+    /**
+     * New log text since [offset]. Returns text + new offset. The launcher trims the file when it
+     * passes ~256KB, so a smaller size than [offset] means "restart from the beginning".
+     */
+    fun logSince(ctx: Context, offset: Long): Pair<String, Long> {
+        return try {
+            val f = File(serversDir(ctx), "servers.log")
+            if (!f.isFile) return "" to 0L
+            val len = f.length()
+            val from = if (len < offset) 0L else offset
+            if (len == from) return "" to len
+            java.io.RandomAccessFile(f, "r").use { raf ->
+                raf.seek(from)
+                val n = (len - from).coerceAtMost(64 * 1024).toInt()
+                val buf = ByteArray(n)
+                raf.readFully(buf)
+                String(buf, Charsets.UTF_8) to (from + n)
+            }
+        } catch (_: Exception) {
+            "" to offset
         }
     }
 

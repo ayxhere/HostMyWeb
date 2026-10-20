@@ -280,7 +280,13 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
                 _stage.value = null
                 _imported.value = result.config.name
                 for (w in result.warnings) _messages.emit(w)
-                if (result.config.runtime == RuntimeType.SERVER) {
+                if (result.config.runtime == RuntimeType.SERVER && result.config.servers.size > 1) {
+                    _messages.emit(
+                        "\"${result.config.name}\": ${result.config.servers.size} servers detected — " +
+                            result.config.servers.joinToString { "${it.name} :${it.port}" } +
+                            ". Ports and subdomains were assigned automatically."
+                    )
+                } else if (result.config.runtime == RuntimeType.SERVER) {
                     _messages.emit(
                         "Server \"${result.config.name}\" ready (entry: ${result.config.entryFile}, " +
                             "port ${result.config.port}). " +
@@ -293,6 +299,20 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
                 _messages.emit(e.message ?: "Import failed")
             } finally {
                 _ui.value = _ui.value.copy(busy = null, progress = null)
+                refresh()
+            }
+        }
+    }
+
+    /** Re-detect the servers (and ports) of a SERVER project after its folders changed. */
+    fun rescanServers(name: String) {
+        viewModelScope.launch {
+            try {
+                val cfg = withContext(Dispatchers.IO) { g.projects.rescanServers(name) }
+                _messages.emit("$name: ${cfg.servers.size} server(s) — " + cfg.servers.joinToString { "${it.name} :${it.port}" })
+            } catch (e: Exception) {
+                _messages.emit(e.message ?: "Rescan failed")
+            } finally {
                 refresh()
             }
         }

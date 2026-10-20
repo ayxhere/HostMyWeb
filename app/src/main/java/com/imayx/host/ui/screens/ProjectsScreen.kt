@@ -217,7 +217,8 @@ fun ProjectsScreen(
                             exportLauncher.launch(info.config.name + ".zip")
                         },
                         onDelete = { deleteFor = info.config.name },
-                        onAiFix = { vm.aiFix(info.config.name) }
+                        onAiFix = { vm.aiFix(info.config.name) },
+                        onRescan = { vm.rescanServers(info.config.name) }
                     )
                 }
                 item { Spacer(Modifier.height(12.dp)) }
@@ -392,7 +393,8 @@ private fun ProjectCard(
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
-    onAiFix: () -> Unit
+    onAiFix: () -> Unit,
+    onRescan: () -> Unit = {}
 ) {
     val c = Ix.c
     val cfg = info.config
@@ -439,6 +441,10 @@ private fun ProjectCard(
                             text = { Text("✦ AI Fix (Groq)", color = c.text) },
                             onClick = { menu = false; onAiFix() }
                         )
+                        DropdownMenuItem(
+                            text = { Text("Rescan servers", color = c.text) },
+                            onClick = { menu = false; onRescan() }
+                        )
                     }
                     DropdownMenuItem(text = { Text("Delete", color = c.danger) }, onClick = { menu = false; onDelete() })
                 }
@@ -455,6 +461,21 @@ private fun ProjectCard(
             mono = true
         )
         KeyValueRow("Domain", cfg.domain.ifBlank { "Not set" }, valueColor = if (cfg.domain.isBlank()) c.soft else c.text)
+        if (cfg.runtime == RuntimeType.SERVER && cfg.servers.isNotEmpty()) {
+            // One row per detected server: "Server 1 · api · :3201 → api.<domain>"
+            cfg.servers.forEachIndexed { i, sv ->
+                val port = if (isPrimary && sv.primary && hostedState != ProcessState.STOPPED) effPort else sv.port
+                val host = if (sv.primary || sv.subdomain.isBlank()) "main (tunnel :$effPort)"
+                else sv.subdomain + "." + cfg.domain.ifBlank { "<domain>" }
+                val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
+                KeyValueRow(
+                    "Server ${i + 1}",
+                    "${sv.name} · :$port\n→ $host\n$where" + if (sv.enabled) "" else "  (disabled)",
+                    valueColor = if (sv.enabled) c.text else c.soft,
+                    mono = true
+                )
+            }
+        }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             IxButton("Settings", onSettings, icon = Icons.Rounded.Settings, kind = BtnKind.Secondary, modifier = Modifier.weight(1f))
@@ -594,7 +615,14 @@ private fun ImportDialog(
                 )
                 stage.detection?.let { d ->
                     KeyValueRow("Type", "Server (Node.js) — auto-detected", valueColor = c.ok)
-                    KeyValueRow("Entry", d.entryGuess, mono = true)
+                    if (d.servers.size > 1) {
+                        KeyValueRow("Servers", "${d.servers.size} found — each gets its own port + subdomain", valueColor = c.ok)
+                        d.servers.forEachIndexed { i, f ->
+                            KeyValueRow("Server ${i + 1}", (if (f.dir.isEmpty()) "(root)" else f.dir + "/") + "  " + f.entry, mono = true)
+                        }
+                    } else {
+                        KeyValueRow("Entry", d.entryGuess, mono = true)
+                    }
                     KeyValueRow(
                         "node_modules",
                         if (d.hasNodeModules) "Included" else "MISSING",

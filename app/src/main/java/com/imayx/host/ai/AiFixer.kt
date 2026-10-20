@@ -43,7 +43,10 @@ object AiFixer {
         val ok: Boolean,
         val summary: String,
         val editsApplied: Int,
-        val backupName: String?
+        val backupName: String?,
+        /** Short "where": file:line (or entry) the error pointed at. */
+        val where: String = "",
+        val files: List<String> = emptyList()
     )
 
     fun isConfigured(secrets: SecretStore): Boolean =
@@ -66,24 +69,28 @@ object AiFixer {
         backups: com.imayx.host.backup.BackupManager,
         projectStore: com.imayx.host.data.ProjectStore,
         projectName: String,
-        reason: String
+        reason: String,
+        spec: ServerRuntime.ServerSpec? = null,
+        logOverride: String? = null,
+        cooldownMs: Long = AUTO_COOLDOWN_MS
     ): FixResult? {
         if (!settings.aiAutoFix) return null
         if (!isConfigured(secrets)) {
             LogBus.w(LogCategory.NODE, "AI auto-fix skipped for $projectName: no Groq API key in Settings")
             return null
         }
-        val since = System.currentTimeMillis() - lastAutoFix(settings, projectName)
-        if (since < AUTO_COOLDOWN_MS) {
-            LogBus.w(LogCategory.NODE, "AI auto-fix cooling down for $projectName (${(AUTO_COOLDOWN_MS - since) / 1000}s left)")
+        val cdKey = spec?.name ?: projectName
+        val since = System.currentTimeMillis() - lastAutoFix(settings, cdKey)
+        if (since < cooldownMs) {
+            LogBus.w(LogCategory.NODE, "AI auto-fix cooling down for $cdKey (${(cooldownMs - since) / 1000}s left)")
             return null
         }
-        markAutoFix(settings, projectName)
-        LogBus.i(LogCategory.NODE, "AI auto-fix triggered for $projectName: $reason")
-        return fixProject(ctx, settings, secrets, backups, projectStore, projectName, reason)
+        markAutoFix(settings, cdKey)
+        LogBus.i(LogCategory.NODE, "AI auto-fix triggered for $cdKey: ${reason.take(200)}")
+        return fixProject(ctx, settings, secrets, backups, projectStore, projectName, reason, spec = spec, logOverride = logOverride)
     }
 
-    /** Manual entry point (user tapped "AI Fix"). */
+    /** Manual entry point (user tapped "AI Fix") and the worker behind auto-fix. */
     suspend fun fixProject(
         ctx: android.content.Context,
         settings: AppSettings,
@@ -92,51 +99,73 @@ object AiFixer {
         projectStore: com.imayx.host.data.ProjectStore,
         projectName: String,
         reason: String,
-        onProgress: (String) -> Unit = {}
+        onProgress: (String) -> Unit = {},
+        spec: ServerRuntime.ServerSpec? = null,
+        logOverride: String? = null
     ): FixResult = withContext(Dispatchers.IO) {
+        val label = spec?.name ?: projectName
         val key = secrets.get(SecretStore.KEY_GROQ_API_KEY)
         if (key.isNullOrBlank()) {
             return@withContext FixResult(false, "No Groq API key. Add one in Settings → AI auto-fix.", 0, null)
         }
-        val dir = projectStore.projectDir(projectName)
-        if (!dir.isDirectory) {
+        val projectDir = projectStore.projectDir(projectName)
+        if (!projectDir.isDirectory) {
             return@withContext FixResult(false, "Project directory not found.", 0, null)
         }
+        // Multi-server: everything (tree, entry, edits) is relative to THIS server's folder.
+        val dir = spec?.dir?.takeIf { it.isDirectory } ?: projectDir
         try {
             onProgress("Reading project…")
             val tree = fileTree(dir)
             val pkg = readTextCapped(File(dir, "package.json"), 3000)
-            val entry = detectEntry(dir, pkg)
+            val entry = spec?.entry ?: detectEntry(dir, pkg)
             val entrySrc = entry?.let { readTextCapped(File(dir, it), 12000) } ?: "(entry not found)"
-            val logs = ServerRuntime.serverLogTail(ctx).takeLast(MAX_LOG_CHARS)
+            val logs = (logOverride ?: ServerRuntime.serverLogTail(ctx)).takeLast(MAX_LOG_CHARS)
+
+            // Files the stack trace points at (the bug is rarely in the entry file).
+            val refs = stackRefs(logs, dir)
+            val extra = StringBuilder()
+            for ((rel, _) in refs.filter { it.first != entry }.take(3)) {
+                extra.append("\n--- ").append(rel).append(" ---\n").append(readTextCapped(File(dir, rel), 8000)).append('\n')
+            }
+            val where = refs.firstOrNull()?.let { "${it.first}:${it.second}" } ?: (entry ?: "unknown")
+            val issue = firstErrorLine(logs)
 
             onProgress("Asking Groq…")
             val reply = chat(
                 key, settings.aiModel,
                 SYSTEM_PROMPT,
-                buildUserMessage(projectName, reason, tree, pkg, entry, entrySrc, logs)
+                buildUserMessage(label, reason, tree, pkg, entry, entrySrc, logs) +
+                    (if (extra.isNotEmpty()) "\nOther files referenced by the error:$extra" else "")
             )
             val parsed = parseReply(reply)
 
             if (parsed.edits.isEmpty()) {
                 val summary = "Groq analysis: ${parsed.analysis.take(500)} (no file edits suggested)"
-                LogBus.i(LogCategory.NODE, "AI fix for $projectName: $summary")
-                return@withContext FixResult(true, summary, 0, null)
+                LogBus.i(LogCategory.NODE, "AI fix for $label: $summary")
+                val r = FixResult(true, summary, 0, null, where)
+                postResult(ctx, label, where, issue, r)
+                return@withContext r
             }
 
             onProgress("Backing up…")
             val backup = try {
                 backups.create(projectName)
             } catch (e: Exception) {
-                return@withContext FixResult(false, "Backup failed, refusing to edit: ${e.message}", 0, null)
+                return@withContext FixResult(false, "Backup failed, refusing to edit: ${e.message}", 0, null, where)
             }
 
             onProgress("Applying ${parsed.edits.size} edit(s)…")
             var applied = 0
+            val written = ArrayList<String>()
             for (e in parsed.edits) {
                 val target = safeTarget(dir, e.path)
                 if (target == null) {
                     LogBus.w(LogCategory.NODE, "AI fix rejected unsafe path: ${e.path}")
+                    continue
+                }
+                if (e.path.trim().trimStart('/').startsWith("node_modules")) {
+                    LogBus.w(LogCategory.NODE, "AI fix refused to edit node_modules: ${e.path}")
                     continue
                 }
                 if (e.content.length > MAX_FILE_BYTES) {
@@ -146,6 +175,7 @@ object AiFixer {
                 target.parentFile?.mkdirs()
                 target.writeText(e.content)
                 applied++
+                written.add(e.path)
                 LogBus.i(LogCategory.NODE, "AI fix wrote ${e.path} (${e.content.length} chars)")
             }
 
@@ -154,14 +184,56 @@ object AiFixer {
                 append("Analysis: ${parsed.analysis.take(400)}")
                 if (parsed.notes.isNotBlank()) append(" Notes: ${parsed.notes.take(300)}")
             }
-            LogBus.i(LogCategory.NODE, "AI fix for $projectName done: $summary (backup ${backup.file.name})")
-            FixResult(true, summary, applied, backup.file.name)
+            LogBus.i(LogCategory.NODE, "AI fix for $label done: $summary (backup ${backup.file.name})")
+            val r = FixResult(true, summary, applied, backup.file.name, where, written)
+            postResult(ctx, label, where, issue, r)
+            r
         } catch (e: Exception) {
             val msg = "AI fix failed: ${e.message ?: e.javaClass.simpleName}"
-            LogBus.e(LogCategory.NODE, "AI fix for $projectName: $msg")
-            FixResult(false, msg, 0, null)
+            LogBus.e(LogCategory.NODE, "AI fix for $label: $msg")
+            val r = FixResult(false, msg, 0, null)
+            postResult(ctx, label, "", firstErrorLine(logOverride ?: ""), r)
+            r
         }
     }
+
+    /** Notification: where the problem was, what it was, what the AI changed. */
+    private fun postResult(ctx: android.content.Context, label: String, where: String, issue: String, r: FixResult) {
+        val title = when {
+            !r.ok -> "AI fix failed · $label"
+            r.editsApplied > 0 -> "AI fixed · $label"
+            else -> "AI checked · $label"
+        }
+        val text = buildString {
+            if (where.isNotBlank()) append("Where: ").append(where).append('\n')
+            if (issue.isNotBlank()) append("Issue: ").append(issue.take(220)).append('\n')
+            append(if (r.ok) "Fix: " else "Result: ").append(r.summary.take(420))
+            if (r.files.isNotEmpty()) append("\nEdited: ").append(r.files.joinToString())
+            if (r.backupName != null) append("\nBackup: ").append(r.backupName)
+        }
+        AiNotifier.post(ctx, title, text)
+    }
+
+    private val stackRx = Regex("""(/[^\s:()|'"]+\.(?:m?js|cjs|json)):(\d+)""")
+
+    /** (relative path, line) pairs from the log that live inside [dir] (never node_modules). */
+    private fun stackRefs(logs: String, dir: File): List<Pair<String, Int>> {
+        val base = try { dir.canonicalPath } catch (_: Exception) { return emptyList() }
+        val seen = LinkedHashMap<String, Int>()
+        for (m in stackRx.findAll(logs)) {
+            val path = m.groupValues[1]
+            if (path.contains("/node_modules/") || !path.startsWith("$base/")) continue
+            val rel = path.removePrefix("$base/")
+            if (File(dir, rel).isFile) seen.putIfAbsent(rel, m.groupValues[2].toIntOrNull() ?: 0)
+        }
+        return seen.map { it.key to it.value }
+    }
+
+    private fun firstErrorLine(logs: String): String =
+        logs.lineSequence().lastOrNull {
+            val l = it.lowercase()
+            l.contains("error") || l.contains("uncaught") || l.contains("failed to start") || l.contains("did not open")
+        }?.substringAfter("[server-host] ")?.take(300).orEmpty()
 
     // ------------------------------------------------------------------ prompt
 
@@ -174,6 +246,8 @@ Environment facts:
 - There is no network install step: DO NOT add new npm dependencies. Only use packages already in node_modules.
 - SQLite is via the node:sqlite built-in. The database file lives at process.env.DB_PATH.
 - Keep changes minimal: fix the reported error, don't redesign, don't rename files, don't change the public API.
+- The project may contain several servers; you only see ONE server folder. Paths in "edits" are relative to that server folder.
+- Several servers run in one process: never call process.exit(), never bind a fixed port, never change process.env.PORT globally after startup (read it once at the top).
 
 You receive: the project file tree, package.json, the entry file, and the tail of the runtime log showing the error.
 
@@ -213,6 +287,23 @@ $logs
     private data class Edit(val path: String, val content: String)
 
     private fun chat(apiKey: String, model: String, system: String, user: String): String {
+        var last: Exception? = null
+        // One retry on rate limit / server errors, then a smaller fallback model.
+        for ((i, m) in listOf(model, model, "llama-3.1-8b-instant").withIndex()) {
+            try {
+                return chatOnce(apiKey, m, system, user)
+            } catch (e: Exception) {
+                last = e
+                val msg = e.message.orEmpty()
+                val retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5") || msg.contains("timeout", true)
+                if (!retryable) break
+                try { Thread.sleep(if (i == 0) 3000L else 1000L) } catch (_: InterruptedException) { break }
+            }
+        }
+        throw last ?: IllegalStateException("Groq request failed")
+    }
+
+    private fun chatOnce(apiKey: String, model: String, system: String, user: String): String {
         val body = JSONObject()
             .put("model", model)
             .put("temperature", 0.2)

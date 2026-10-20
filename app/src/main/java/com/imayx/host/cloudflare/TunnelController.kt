@@ -105,6 +105,20 @@ class TunnelController(
 
     fun isActive(): Boolean = proc != null
 
+    fun hasLastStart(): Boolean = lastStart != null
+
+    /**
+     * Restart with the SAME parameters after a network / VPN change. Transport and edge addresses are
+     * decided again (AUTO: HTTP/2 while a VPN is up, QUIC otherwise). Never loops: one call = one start.
+     */
+    fun restartForNetworkChange(): String? {
+        val l = lastStart ?: return "tunnel was never started"
+        return synchronized(lock) {
+            http2FallbackDone = false
+            startLocked(l.first, l.second, l.third, forceHttp2 = false)
+        }
+    }
+
     /** Starts the tunnel. Returns an error message, or null when the process was launched. */
     fun start(mode: TunnelMode, port: Int, token: String?): String? {
         return synchronized(lock) {
@@ -164,6 +178,16 @@ class TunnelController(
                 }
             }
             args.addAll(edge)
+            args.add("--edge-ip-version")
+            args.add("4")
+            // Android has no resolv.conf: if this cloudflared build exposes the flag, give it public resolvers
+            // so the local "[::1]:53 connection refused" lookups succeed. Skipped when unsupported.
+            if (manager.supportsFlag("--dns-resolver-addrs")) {
+                args.add("--dns-resolver-addrs")
+                args.add("1.1.1.1:53")
+                args.add("--dns-resolver-addrs")
+                args.add("8.8.8.8:53")
+            }
             var tunnelId: String? = null
             when (mode) {
                 TunnelMode.QUICK -> {

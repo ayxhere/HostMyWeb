@@ -76,6 +76,35 @@ class ProjectStore(context: Context) {
         put("entryFile", c.entryFile)
         put("nodeArgs", c.nodeArgs)
         put("createdAt", c.createdAt)
+        put("servers", org.json.JSONArray().also { arr ->
+            for (sv in c.servers) arr.put(
+                JSONObject().put("name", sv.name).put("dir", sv.dir).put("entry", sv.entry)
+                    .put("port", sv.port).put("subdomain", sv.subdomain)
+                    .put("enabled", sv.enabled).put("primary", sv.primary)
+            )
+        })
+    }
+
+    private fun readServers(o: JSONObject): List<ServerDef> {
+        val arr = o.optJSONArray("servers") ?: return emptyList()
+        val out = ArrayList<ServerDef>()
+        for (i in 0 until arr.length()) {
+            val j = arr.optJSONObject(i) ?: continue
+            val entry = j.optString("entry", "")
+            if (entry.isBlank()) continue
+            out.add(
+                ServerDef(
+                    name = j.optString("name", "server${i + 1}"),
+                    dir = j.optString("dir", ""),
+                    entry = entry,
+                    port = j.optInt("port", 3000).coerceIn(1024, 65535),
+                    subdomain = j.optString("subdomain", ""),
+                    enabled = j.optBoolean("enabled", true),
+                    primary = j.optBoolean("primary", false)
+                )
+            )
+        }
+        return out
     }
 
     private fun fromJson(o: JSONObject, name: String): ProjectConfig {
@@ -96,6 +125,7 @@ class ProjectStore(context: Context) {
             autoRestart = o.optBoolean("autoRestart", false),
             entryFile = o.optString("entryFile", "server.js"),
             nodeArgs = o.optString("nodeArgs", ""),
+            servers = readServers(o),
             createdAt = o.optLong("createdAt", System.currentTimeMillis())
         )
     }

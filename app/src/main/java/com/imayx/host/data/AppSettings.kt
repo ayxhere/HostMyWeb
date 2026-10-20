@@ -164,4 +164,20 @@ class AppSettings(context: Context) {
             prefs.edit().putString("ai_model", v.trim().ifBlank { "llama-3.3-70b-versatile" }).apply()
             bump()
         }
+
+    /** Push Cloudflare tunnel routes + DNS for each server's subdomain automatically (named tunnel + API token). */
+    var autoRoutes: Boolean
+        get() = prefs.getBoolean("auto_routes", true)
+        set(v) {
+            prefs.edit().putBoolean("auto_routes", v).apply()
+            bump()
+        }
+
+    /** Restart the tunnel by itself when the network / VPN changes. */
+    var netWatch: Boolean
+        get() = prefs.getBoolean("net_watch", true)
+        set(v) {
+            prefs.edit().putBoolean("net_watch", v).apply()
+            bump()
+        }
 }

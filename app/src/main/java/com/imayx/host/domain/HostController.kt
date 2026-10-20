@@ -41,7 +41,8 @@ class HostController(
     private val runtimes: RuntimeManager,
     private val tunnel: TunnelController,
     private val secrets: SecretStore,
-    private val backups: com.imayx.host.backup.BackupManager
+    private val backups: com.imayx.host.backup.BackupManager,
+    private val cloudflareApi: com.imayx.host.cloudflare.CloudflareApi
 ) {
     private val _state = MutableStateFlow(HostState())
     val state: StateFlow<HostState> = _state
@@ -159,39 +160,110 @@ class HostController(
      * together — this is the "one tap runs every server" path.
      * Returns a user-facing error when the servers could not be (re)started.
      */
-    private fun refreshServerRuntime(): String? {
-        val specs = synchronized(serverProjects) { serverProjects.values.toList() }.map { cfg ->
-            val dir = store.projectDir(cfg.name)
-            val env = ServerRuntime.buildEnv(appContext, cfg.name, dir, secrets.getEnv(cfg.name))
-            ServerRuntime.ServerSpec(cfg.name, dir, cfg.entryFile, cfg.port, env)
-        }
+    private fun refreshServerRuntime(restart: Boolean = false): String? {
+        val specs = currentSpecs()
         if (specs.isEmpty()) {
             ServerRuntime.stopServers(appContext)
             return null
         }
-        val err = ServerRuntime.startServers(appContext, specs)
+        val err = if (restart) ServerRuntime.restartServers(appContext, specs) else ServerRuntime.startServers(appContext, specs)
         if (err != null) {
             LogBus.e(LogCategory.NODE, err)
             _notices.tryEmit(err)
-            // AI auto-fix (no permission asked — the user enabled it in Settings):
-            // let Groq read the failure, patch the project, then restart once.
-            // Cooldown inside maybeAutoFix prevents fix loops.
-            val names = specs.map { it.name }
+            // Prerequisite failure (missing entry / node_modules): let the AI fixer try once.
             scope.launch {
-                for (n in names) {
+                for (sp in specs) {
                     val res = com.imayx.host.ai.AiFixer.maybeAutoFix(
-                        appContext, settings, secrets, backups, store, n,
-                        "server failed to start: $err"
+                        appContext, settings, secrets, backups, store, sp.project,
+                        "server failed to start: $err", sp
                     )
                     if (res != null && res.ok && res.editsApplied > 0) {
-                        LogBus.i(LogCategory.NODE, "AI auto-fix patched $n — restarting server runtime")
-                        refreshServerRuntime()
+                        LogBus.i(LogCategory.NODE, "AI auto-fix patched ${sp.name} — restarting server runtime")
+                        refreshServerRuntime(restart = true)
                         break
                     }
                 }
             }
+        } else {
+            syncRoutes(specs)
         }
         return err
+    }
+
+    /** Specs for every SERVER project currently hosted (multi-server projects expand to one spec per server). */
+    fun currentSpecs(): List<ServerRuntime.ServerSpec> {
+        val cfgs = synchronized(serverProjects) { serverProjects.values.toList() }
+        val all = cfgs.flatMap { specsFor(it) }
+        // Two servers must never share a port (EADDRINUSE would kill one). Move later duplicates.
+        val used = HashSet<Int>()
+        val out = ArrayList<ServerRuntime.ServerSpec>()
+        for (sp in all) {
+            var port = sp.port
+            if (!used.add(port)) {
+                val taken = used + all.map { it.port } + setOf(3101, 3102, settings.primaryPort)
+                var p = maxOf(settings.defaultPort, 3200)
+                while (p in taken) p++
+                LogBus.w(LogCategory.NODE, "Port $port already used — ${sp.name} moved to $p")
+                used.add(p)
+                port = p
+            }
+            out.add(if (port == sp.port) sp else sp.copy(port = port))
+        }
+        return out
+    }
+
+    private fun specsFor(cfg: ProjectConfig): List<ServerRuntime.ServerSpec> {
+        val root = store.projectDir(cfg.name)
+        val secretEnv = secrets.getEnv(cfg.name)
+        if (cfg.servers.isEmpty()) {
+            val env = ServerRuntime.buildEnv(appContext, cfg.name, root, secretEnv)
+            return listOf(ServerRuntime.ServerSpec(cfg.name, root, cfg.entryFile, cfg.port, env))
+        }
+        val isPrimaryProject = activeConfig?.name == cfg.name
+        val multi = cfg.servers.count { it.enabled } > 1
+        return cfg.servers.filter { it.enabled }.map { sv ->
+            val dir = if (sv.dir.isEmpty()) root else java.io.File(root, sv.dir)
+            val env = ServerRuntime.buildEnv(appContext, cfg.name, dir, secretEnv) + mapOf("SERVER_NAME" to sv.name)
+            // The primary server of the primary project always binds the tunnel port.
+            val port = if (isPrimaryProject && sv.primary) settings.primaryPort else sv.port
+            ServerRuntime.ServerSpec(
+                name = if (multi) "${cfg.name}/${sv.name}" else cfg.name,
+                dir = dir, entry = sv.entry, port = port, env = env,
+                project = cfg.name, serverName = sv.name, projectRoot = root,
+                subdomain = if (sv.primary) "" else sv.subdomain
+            )
+        }
+    }
+
+    /** Hard restart of the whole node server process (used after an AI fix). */
+    fun restartServerRuntime(): String? = refreshServerRuntime(restart = true)
+
+    /**
+     * Cloudflare auto-routing: every server with a subdomain (api/ -> api.<domain>) gets an ingress
+     * route to its own 127.0.0.1:<port> + a proxied CNAME. Only for NAMED tunnels with an API token.
+     * Runs in the background; never blocks or fails hosting.
+     */
+    private fun syncRoutes(specs: List<ServerRuntime.ServerSpec>) {
+        if (settings.quickTunnel || !settings.autoRoutes) return
+        val wanted = ArrayList<Pair<String, Int>>()
+        for (sp in specs) {
+            val sub = sp.subdomain
+            if (sub.isNullOrBlank()) continue
+            val base = (store.get(sp.project)?.domain?.ifBlank { null } ?: settings.defaultDomain).trim().lowercase()
+            if (base.isBlank()) continue
+            wanted.add("$sub.$base" to sp.port)
+        }
+        if (wanted.isEmpty()) return
+        scope.launch {
+            val report = try {
+                com.imayx.host.cloudflare.RouteSync.sync(cloudflareApi, secrets, wanted)
+            } catch (e: Exception) {
+                "Route sync failed: ${e.message}"
+            }
+            LogBus.i(LogCategory.CLOUDFLARE, report)
+            _notices.tryEmit(report.lineSequence().first())
+            com.imayx.host.ai.AiNotifier.post(appContext, "Routes updated", report, id = 7001)
+        }
     }
 
     private fun doStartMany(projectNames: List<String>) {

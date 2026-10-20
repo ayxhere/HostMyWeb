@@ -82,6 +82,7 @@ class HostService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var observer: Job? = null
     private var watchdog: Job? = null
+    private var monitor: Job? = null
     private var seenActive = false
 
     override fun onCreate() {
@@ -116,6 +117,9 @@ class HostService : Service() {
                 }
                 observeUntilStopped(expectStop = false)
                 startWatchdog()
+                monitor?.cancel()
+                monitor = scope.launch(Dispatchers.IO) { ServerMonitor.run(applicationContext) }
+                g.netWatcher.start()
             }
         }
         return START_STICKY
@@ -156,6 +160,8 @@ class HostService : Service() {
     private fun finish(removeNotification: Boolean) {
         observer?.cancel()
         watchdog?.cancel()
+        monitor?.cancel()
+        graph.netWatcher.stop()
         if (removeNotification) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

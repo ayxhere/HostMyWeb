@@ -120,6 +120,29 @@ class CloudflareManager(private val context: Context, private val settings: AppS
         return ExecUtil.command(b, args, viaLinker)
     }
 
+    @Volatile
+    private var helpText: String? = null
+
+    /** Does `cloudflared tunnel --help` list [flag]? Cached; false when it cannot be run. */
+    fun supportsFlag(flag: String): Boolean {
+        var text = helpText
+        if (text == null) {
+            text = ""
+            try {
+                val cmd = command(listOf("tunnel", "--help"))
+                if (cmd != null) {
+                    val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
+                    text = p.inputStream.bufferedReader().use { it.readText() }
+                    p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)
+                    p.destroyForcibly()
+                }
+            } catch (_: Exception) {
+            }
+            helpText = text
+        }
+        return text.contains(flag)
+    }
+
     fun uninstall() {
         downloaded.delete()
         cachedProbe = null

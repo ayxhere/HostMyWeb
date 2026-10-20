@@ -127,6 +127,8 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
             SwitchRow("Notifications", ui.notifications, { vm.setNotifications(it) }, subtitle = "Status notification while hosting")
             SwitchRow("Start on boot", ui.startOnBoot, { vm.setStartOnBoot(it) }, subtitle = "Resume hosting after the phone restarts (opt-in)")
             SwitchRow("AyX backend", ui.ayxBackend, { vm.setAyxBackend(it) }, subtitle = "Run the AyX Group API inside the app (port 3101) while hosting")
+            SwitchRow("Auto routes (api./hello.)", ui.autoRoutes, { vm.setAutoRoutes(it) }, subtitle = "Create Cloudflare route + DNS for every server's subdomain (needs API token + named tunnel)")
+            SwitchRow("Auto reconnect on VPN/network change", ui.netWatch, { vm.setNetWatch(it) }, subtitle = "Restart the tunnel by itself when VPN or Wi-Fi/data changes")
         }
 
         SectionLabel("Cloudflare credentials")

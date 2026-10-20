@@ -30,10 +30,11 @@ class AppGraph(val app: Application) {
     val backups = BackupManager(app, projects)
     val cloudflare = CloudflareManager(app, settings)
     val tunnel = TunnelController(app, cloudflare, registry, settings)
+    val netWatcher = com.imayx.host.cloudflare.NetworkWatcher(app, tunnel, settings)
     val cloudflareApi = CloudflareApi { secrets.get(SecretStore.KEY_API_TOKEN) }
     val nodeInstaller = NodeInstaller(app)
     val runtimes = RuntimeManager(app, projectStore, secrets, nodeInstaller, registry)
-    val host = HostController(app, settings, projectStore, runtimes, tunnel, secrets, backups)
+    val host = HostController(app, settings, projectStore, runtimes, tunnel, secrets, backups, cloudflareApi)
     val monitor = ResourceMonitor(app)
 }
 

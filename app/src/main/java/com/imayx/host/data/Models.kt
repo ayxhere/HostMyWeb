@@ -24,6 +24,22 @@ data class LogEntry(
 
 enum class ThemeMode { AMOLED, DARK, LIGHT }
 
+/**
+ * One Node.js server inside a SERVER project (a ZIP can contain several: api/, hello/, ...).
+ * [dir] is relative to the project folder ("" = project root). [subdomain] "" = apex/primary
+ * (no route change), otherwise the host becomes "<subdomain>.<base domain>".
+ */
+data class ServerDef(
+    val name: String,
+    val dir: String,
+    val entry: String,
+    val port: Int,
+    val subdomain: String = "",
+    val enabled: Boolean = true,
+    /** The primary server binds the primary (tunnel) port when its project is the primary project. */
+    val primary: Boolean = false
+)
+
 data class ProjectConfig(
     val name: String,
     val runtime: RuntimeType = RuntimeType.STATIC,
@@ -39,6 +55,8 @@ data class ProjectConfig(
     val entryFile: String = "server.js",
     /** Node only: extra arguments (space separated). */
     val nodeArgs: String = "",
+    /** SERVER projects: every detected server. Empty = legacy single-server project (entryFile/port). */
+    val servers: List<ServerDef> = emptyList(),
     val createdAt: Long = System.currentTimeMillis()
 )
 

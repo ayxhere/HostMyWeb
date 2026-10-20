@@ -37,7 +37,8 @@ class ProjectManager(
 
     /** First port at or above the default that no project uses (not the primary port, not the embedded 3101/3102). */
     fun nextFreePort(): Int {
-        val used = store.list().map { it.port }.toSet() + setOf(3101, 3102, settings.primaryPort)
+        val used = store.list().flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toSet() +
+            setOf(3101, 3102, settings.primaryPort)
         var p = settings.defaultPort
         while (p in used) p++
         return p
@@ -88,7 +89,9 @@ class ProjectManager(
         /** Entry file guess from the ZIP listing (confirmed against real files after extraction). */
         val entryGuess: String,
         val hasNodeModules: Boolean,
-        val skippedSecrets: List<String>
+        val skippedSecrets: List<String>,
+        /** Every server folder found in the ZIP listing (>1 = multi-server ZIP). */
+        val servers: List<ServerScanner.Found> = emptyList()
     )
 
     /**
@@ -101,12 +104,13 @@ class ProjectManager(
         }.filter { it.isNotEmpty() }
         if (rel.isEmpty()) return null
         val set = rel.toSet()
-        val looksServer = "package.json" in set || serverEntryCandidates.any { it in set }
+        val looksServer = "package.json" in set || serverEntryCandidates.any { it in set } ||
+            ServerScanner.scanNames(rel).isNotEmpty()
         if (!looksServer) return null
         val entryGuess = serverEntryCandidates.firstOrNull { it in set } ?: "server.js"
         val hasModules = set.any { it == "node_modules" || it.startsWith("node_modules/") }
         val skipped = rel.filter { '/' !in it && isSecretFileName(it) }.distinct().sorted()
-        return ServerDetection(entryGuess, hasModules, skipped)
+        return ServerDetection(entryGuess, hasModules, skipped, ServerScanner.scanNames(rel))
     }
 
     /** Result of [importStaged]: the saved config plus human-readable import notes. */
@@ -243,12 +247,18 @@ class ProjectManager(
             // Secret quarantine: real keys must live in the app's encrypted env store,
             // never inside an imported project (which can be exported/shared as a ZIP).
             val quarantined = ArrayList<String>()
-            dir.listFiles()?.forEach { f ->
-                if (f.isFile && isSecretFileName(f.name)) {
-                    quarantined.add(f.name)
-                    f.delete()
+            // Root AND server sub-folders (multi-server ZIPs keep a .env per server); node_modules is skipped.
+            fun sweep(d: File, depth: Int) {
+                d.listFiles()?.forEach { f ->
+                    if (f.isFile && isSecretFileName(f.name)) {
+                        quarantined.add(f.relativeTo(dir).path)
+                        f.delete()
+                    } else if (f.isDirectory && depth < 3 && f.name != "node_modules" && f.name != ".git") {
+                        sweep(f, depth + 1)
+                    }
                 }
             }
+            sweep(dir, 0)
             if (quarantined.isNotEmpty()) {
                 val msg = "Skipped secret file(s): ${quarantined.joinToString(", ")} — " +
                     "put keys in Project → Settings → Environment secrets instead."
@@ -258,8 +268,27 @@ class ProjectManager(
 
             // Server detection: a Node.js project becomes a SERVER project (built-in
             // Node.js, one-tap start) instead of a static site.
-            val entry = detectServerEntry(dir)
-            val cfg = if (entry != null) {
+            val found = ServerScanner.scan(dir)
+            val entry = found.firstOrNull { it.dir.isEmpty() }?.entry ?: found.firstOrNull()?.let {
+                if (it.dir.isEmpty()) it.entry else "${it.dir}/${it.entry}"
+            } ?: detectServerEntry(dir)
+            val cfg = if (found.isNotEmpty()) {
+                val defs = buildDefs(name, found)
+                for (d in defs) {
+                    val sd = if (d.dir.isEmpty()) dir else File(dir, d.dir)
+                    if (File(sd, "package.json").isFile && !ServerScanner.hasNodeModules(dir, sd)) {
+                        warnings.add("${d.name}: node_modules not found — this server will fail to start until its dependencies are included.")
+                    }
+                }
+                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, ${defs.size} server(s): " +
+                    defs.joinToString { "${it.name}:${it.port}" } + ")")
+                val prim = defs.firstOrNull { it.primary } ?: defs.first()
+                ProjectConfig(
+                    name = name, runtime = RuntimeType.SERVER, port = prim.port,
+                    entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}",
+                    servers = defs
+                )
+            } else if (entry != null) {
                 if (File(dir, "package.json").isFile && !File(dir, "node_modules").isDirectory) {
                     warnings.add(
                         "node_modules not found in this ZIP — the server will fail to start until " +
@@ -284,6 +313,37 @@ class ProjectManager(
         } finally {
             zip.delete()
         }
+    }
+
+    /** Assigns names, subdomains and free ports to freshly scanned servers. */
+    private fun buildDefs(project: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
+        val used = store.list().filter { it.name != project }
+            .flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toSet()
+        return ServerScanner.toDefs(found, project, used, settings.primaryPort, maxOf(settings.defaultPort, 3200))
+    }
+
+    /**
+     * Re-detects the servers of an existing SERVER project (after the user edited/added folders).
+     * Keeps name/subdomain/port/enabled of servers that still exist (matched by folder).
+     */
+    fun rescanServers(name: String): ProjectConfig {
+        val cfg = store.get(name) ?: throw ProjectException("Project not found")
+        val dir = store.projectDir(name)
+        val found = ServerScanner.scan(dir)
+        if (found.isEmpty()) throw ProjectException("No Node.js server found in this project")
+        val fresh = buildDefs(name, found)
+        val merged = fresh.map { f ->
+            val old = cfg.servers.firstOrNull { it.dir == f.dir }
+            if (old != null) f.copy(name = old.name, port = old.port, subdomain = old.subdomain, enabled = old.enabled, primary = old.primary) else f
+        }
+        val prim = merged.firstOrNull { it.primary } ?: merged.first()
+        val out = cfg.copy(
+            runtime = RuntimeType.SERVER, servers = merged,
+            entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
+        )
+        store.save(out)
+        LogBus.i(LogCategory.SYSTEM, "Rescanned $name: ${merged.size} server(s)")
+        return out
     }
 
     fun exportZip(name: String, out: OutputStream): Int {

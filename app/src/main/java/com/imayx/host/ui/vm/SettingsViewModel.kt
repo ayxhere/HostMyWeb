@@ -25,6 +25,8 @@ data class SettingsUi(
     val projects: List<String> = emptyList(),
     val startOnBoot: Boolean = false,
     val ayxBackend: Boolean = true,
+    val autoRoutes: Boolean = true,
+    val netWatch: Boolean = true,
     val notifications: Boolean = true,
     val autosave: Boolean = false,
     val cloudflaredUrl: String = "",
@@ -59,7 +61,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(
             theme = s.themeMode, port = s.defaultPort, primaryPort = s.primaryPort,
             defaultProject = s.activeProject, defaultDomain = s.defaultDomain,
-            startOnBoot = s.startOnBoot, ayxBackend = s.ayxBackendEnabled, notifications = s.notificationsEnabled, autosave = s.autosave,
+            startOnBoot = s.startOnBoot, ayxBackend = s.ayxBackendEnabled, autoRoutes = s.autoRoutes, netWatch = s.netWatch, notifications = s.notificationsEnabled, autosave = s.autosave,
             cloudflaredUrl = s.cloudflaredUrl, nodeUrl = s.nodeRuntimeUrl,
             lockEnabled = g.appLock.isEnabled(), biometric = g.appLock.isBiometricEnabled(),
             aiAutoFix = s.aiAutoFix, aiModel = s.aiModel,
@@ -96,6 +98,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setDefaultDomain(d: String) { g.settings.defaultDomain = d; refresh() }
     fun setStartOnBoot(v: Boolean) { g.settings.startOnBoot = v; refresh() }
     fun setAyxBackend(v: Boolean) { g.settings.ayxBackendEnabled = v; refresh() }
+    fun setAutoRoutes(v: Boolean) { g.settings.autoRoutes = v; refresh() }
+    fun setNetWatch(v: Boolean) { g.settings.netWatch = v; refresh(); if (!v) g.netWatcher.stop() else g.netWatcher.start() }
     fun setNotifications(v: Boolean) { g.settings.notificationsEnabled = v; refresh() }
     fun setAutosave(v: Boolean) { g.settings.autosave = v; refresh() }
     fun setCloudflaredUrl(v: String) { g.settings.cloudflaredUrl = v; refresh() }
