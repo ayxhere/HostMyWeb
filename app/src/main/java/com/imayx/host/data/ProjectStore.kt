@@ -123,7 +123,7 @@ class ProjectStore(context: Context) {
             cloudflareEnabled = o.optBoolean("cloudflareEnabled", true),
             autoStart = o.optBoolean("autoStart", false),
             autoRestart = o.optBoolean("autoRestart", false),
-            entryFile = o.optString("entryFile", "server.js"),
+            entryFile = o.optString("entryFile", ""),
             nodeArgs = o.optString("nodeArgs", ""),
             servers = readServers(o),
             createdAt = o.optLong("createdAt", System.currentTimeMillis())

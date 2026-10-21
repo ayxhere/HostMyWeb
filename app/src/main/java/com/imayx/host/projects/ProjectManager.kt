@@ -109,7 +109,7 @@ class ProjectManager(
         val looksServer = "package.json" in set || serverEntryCandidates.any { it in set } ||
             ServerScanner.scanNames(rel).isNotEmpty()
         if (!looksServer) return null
-        val entryGuess = serverEntryCandidates.firstOrNull { it in set } ?: "server.js"
+        val entryGuess = serverEntryCandidates.firstOrNull { it in set } ?: ""
         val hasModules = set.any { it == "node_modules" || it.startsWith("node_modules/") }
         val skipped = rel.filter { '/' !in it && isSecretFileName(it) }.distinct().sorted()
         return ServerDetection(entryGuess, hasModules, skipped, ServerScanner.scanNames(rel))
@@ -134,7 +134,12 @@ class ProjectManager(
         if (store.exists(name)) throw ProjectException("A project named \"$name\" already exists")
         val dir = store.projectDir(name)
         if (!dir.mkdirs()) throw ProjectException("Could not create project directory")
-        val cfg = ProjectConfig(name = name, runtime = runtime, port = nextFreePort())
+        // create() writes a real server.js starter for NODE/SERVER projects, so the
+        // entry is a fact there; STATIC projects have no entry at all.
+        val cfg = ProjectConfig(
+            name = name, runtime = runtime, port = nextFreePort(),
+            entryFile = if (runtime == RuntimeType.STATIC) "" else "server.js"
+        )
         store.save(cfg)
         if (runtime == RuntimeType.STATIC) {
             File(dir, "index.html").writeText(starterHtml(name))
@@ -420,7 +425,9 @@ class ProjectManager(
             )
         }
         val entry = detectServerEntry(dir)
-        return if (entry != null) cfg.copy(entryFile = entry) else cfg
+        // Nothing detected: clear any stale entry (e.g. an old "server.js" guess) —
+        // the settings field must show EMPTY, never a made-up default.
+        return if (entry != null) cfg.copy(entryFile = entry) else cfg.copy(entryFile = "")
     }
 
     fun exportZip(name: String, out: OutputStream): Int {

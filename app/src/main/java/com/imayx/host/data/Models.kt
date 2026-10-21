@@ -51,8 +51,8 @@ data class ProjectConfig(
     val cloudflareEnabled: Boolean = true,
     val autoStart: Boolean = false,
     val autoRestart: Boolean = false,
-    /** Node only: entry script relative to the project folder. */
-    val entryFile: String = "server.js",
+    /** Node only: entry script relative to the project folder. Empty = not detected yet — never a guessed default. */
+    val entryFile: String = "",
     /** Node only: extra arguments (space separated). */
     val nodeArgs: String = "",
     /** SERVER projects: every detected server. Empty = legacy single-server project (entryFile/port). */

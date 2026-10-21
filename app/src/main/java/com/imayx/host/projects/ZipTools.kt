@@ -21,7 +21,7 @@ data class ZipInfo(
     val otherTypes: Set<String>,
     val unsafeEntries: List<String>,
     val error: String?,
-    /** Normalized file entry names (junk skipped, capped) — used for server detection. */
+    /** Normalized file entry names (junk skipped; node_modules sampled, real names capped at 20k) — used for server detection. */
     val entryNames: List<String> = emptyList()
 ) {
     val isSafe: Boolean get() = error == null && unsafeEntries.isEmpty()
@@ -56,6 +56,8 @@ object ZipTools {
         val unsafe = ArrayList<String>()
         val others = HashSet<String>()
         val names = ArrayList<String>()
+        var realNames = 0
+        var moduleNames = 0
         var entries = 0
         var files = 0
         var total = 0L
@@ -80,7 +82,22 @@ object ZipTools {
                     if (isJunk(name)) continue
                     if (e.isDirectory) continue
                     files++
-                    if (names.size < 3000) names.add(name)
+                    // entryNames feeds server detection only, and detection never looks
+                    // INSIDE node_modules (the scanner skips it) — but a bundled
+                    // node_modules holds tens of thousands of entries and used to eat the
+                    // whole name cap, pushing every real server file out of the list.
+                    // Multi-server ZIPs then "found" 0–1 servers in the import preview
+                    // (order-dependent). Sample a few module names (enough for the
+                    // has-node_modules checks) and cap the REAL project names generously.
+                    if (name.split('/').contains("node_modules")) {
+                        if (moduleNames < 16) {
+                            moduleNames++
+                            names.add(name)
+                        }
+                    } else if (realNames < 20_000) {
+                        realNames++
+                        names.add(name)
+                    }
                     val size = if (e.size >= 0) e.size else 0L
                     total += size
                     if (total > MAX_TOTAL_BYTES) {

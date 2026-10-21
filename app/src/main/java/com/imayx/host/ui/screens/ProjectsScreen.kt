@@ -744,7 +744,7 @@ private fun ImportDialog(
                             KeyValueRow("Server ${i + 1}", (if (f.dir.isEmpty()) "(root)" else f.dir + "/") + "  " + f.entry, mono = true)
                         }
                     } else {
-                        KeyValueRow("Entry", d.entryGuess, mono = true)
+                        KeyValueRow("Entry", d.entryGuess.ifBlank { "—" }, mono = true)
                     }
                     KeyValueRow(
                         "node_modules",
@@ -842,8 +842,11 @@ private fun ConfigDialog(
     val domainClean = cleanDomain(domain)
     val domainErr = if (domainClean.isNotEmpty() && !isValidHostname(domainClean)) "Enter a valid hostname, e.g. example.com" else null
     val rootErr = if (rootDir.contains("..") || rootDir.startsWith("/")) "Must be a relative folder inside the project" else null
+    // Blank entry is an error only for NODE (a hand-run script must be named). For
+    // SERVER projects blank means "nothing detected yet" — Save re-detects from the
+    // files and stores the real path or leaves it EMPTY, never a "server.js" guess.
     val entryErr = if ((runtime == RuntimeType.NODE || runtime == RuntimeType.SERVER) &&
-        (entry.isBlank() || entry.contains("..") || entry.startsWith("/"))
+        (entry.contains("..") || entry.startsWith("/") || (runtime == RuntimeType.NODE && entry.isBlank()))
     ) "Relative file inside the project" else null
     val active = servers.filter { it.enabled }
     val srvErr = when {
@@ -975,7 +978,7 @@ private fun ConfigDialog(
                             cloudflareEnabled = cf,
                             autoStart = autoStart,
                             autoRestart = autoRestart,
-                            entryFile = entry.ifBlank { "server.js" },
+                            entryFile = entry,
                             nodeArgs = args.trim(),
                             servers = servers
                         )
