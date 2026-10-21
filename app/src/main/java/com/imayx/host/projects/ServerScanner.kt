@@ -10,7 +10,8 @@ import java.io.File
  * Rules:
  *  - A directory is a server when it has a runnable entry (package.json scripts.start "node x" -> main ->
  *    server.js, src/server.js, index.js, ...).
- *  - Once a directory is a server, its sub-folders are NOT scanned (src/ of the same server is not a 2nd server).
+ *  - Below a server, only a sub-folder with its OWN package.json can be another server
+ *    (src/ of the same server is not a 2nd server).
  *  - node_modules, .git, dist, build, public, assets, etc. are skipped. Depth limit 3.
  *  - Root server (if any) is the primary/apex server. Otherwise a folder named web/www/main/site/app/frontend
  *    is primary; otherwise the first one.
@@ -37,25 +38,36 @@ object ServerScanner {
         val out = ArrayList<Found>()
         fun walk(dir: File, rel: String, depth: Int) {
             val entry = entryOf(dir)
-            if (entry != null && !isWorkspaceRoot(dir) && looksLikeServer(dir, rel, entry)) {
-                out.add(Found(rel, entry))
-                return
-            }
+            val isServer = entry != null && !isWorkspaceRoot(dir) && looksLikeServer(dir, rel, entry)
+            if (isServer && entry != null) out.add(Found(rel, entry))
             if (depth >= MAX_DEPTH) return
-            dir.listFiles()?.filter { it.isDirectory && it.name !in skipDirs && !it.name.startsWith(".") }
-                ?.sortedBy { it.name.lowercase() }
-                ?.forEach { walk(it, if (rel.isEmpty()) it.name else "$rel/${it.name}", depth + 1) }
+            val children = dir.listFiles()?.filter { it.isDirectory && it.name !in skipDirs && !it.name.startsWith(".") }
+                ?.sortedBy { it.name.lowercase() } ?: return
+            for (child in children) {
+                // Below a server, only an independent package (its own package.json) can be
+                // another server — plain sub-folders (src/, lib/) belong to that server.
+                // Everywhere else, keep looking in every sub-folder.
+                if (isServer && !File(child, "package.json").isFile) continue
+                walk(child, if (rel.isEmpty()) child.name else "$rel/${child.name}", depth + 1)
+            }
         }
         walk(root, "", 0)
         return out
     }
 
+    private val serverMarkers = listOf(
+        ".listen(", "createServer(", "express(", "fastify(",
+        "new Koa(", "new Hono(", "@hono/", "require('koa')", "require(\"koa\")",
+        "from 'koa'", "from \"koa\"", "require('hono')", "from 'hono'", "from \"hono\""
+    )
+
+    private fun hasServerMarkers(t: String): Boolean = serverMarkers.any { t.contains(it) }
+
     /** Sub-folders need proof (package.json or a listen() call) so a frontend folder with app.js is not a server. */
     private fun looksLikeServer(dir: File, rel: String, entry: String): Boolean {
         if (rel.isEmpty() || File(dir, "package.json").isFile) return true
         return try {
-            val t = File(dir, entry).readText().take(60_000)
-            t.contains(".listen(") || t.contains("createServer(") || t.contains("express(") || t.contains("fastify(")
+            hasServerMarkers(File(dir, entry).readText().take(60_000))
         } catch (_: Exception) {
             false
         }
@@ -76,9 +88,9 @@ object ServerScanner {
                 val start = json.optJSONObject("scripts")?.optString("start").orEmpty()
                 val m = Regex("""(?:node|nodemon|bun)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s'";&|]+\.(?:m?js|cjs))""")
                     .find(start)?.groupValues?.getOrNull(1)
-                if (m != null && safe(m) && File(dir, m).isFile) return m
+                if (m != null && safe(m) && File(dir, m).isFile) return m.removePrefix("./")
                 val main = json.optString("main").trim()
-                if (main.isNotEmpty() && safe(main) && File(dir, main).isFile) return main
+                if (main.isNotEmpty() && safe(main) && File(dir, main).isFile) return main.removePrefix("./")
             } catch (_: Exception) {
             }
         }
@@ -94,8 +106,7 @@ object ServerScanner {
         File(dir, "src").listFiles()?.filter { it.isFile }?.forEach { files.add("src/" + it.name) }
         return files.sorted().firstOrNull { n ->
             (n.endsWith(".js") || n.endsWith(".mjs") || n.endsWith(".cjs")) && try {
-                val t = File(dir, n).readText().take(60_000)
-                t.contains(".listen(")
+                hasServerMarkers(File(dir, n).readText().take(60_000))
             } catch (_: Exception) {
                 false
             }
@@ -118,10 +129,13 @@ object ServerScanner {
         val out = ArrayList<Found>()
         val taken = ArrayList<String>()
         for (d in dirs.sortedWith(compareBy({ it.count { c -> c == '/' } }, { it }))) {
-            if (taken.any { t -> t.isEmpty() || d == t || d.startsWith("$t/") }) continue
             fun has(f: String) = (if (d.isEmpty()) f else "$d/$f") in set
+            val hasPkg = has("package.json")
+            // A folder inside an already-found server counts on its own only when it is an
+            // independent package (own package.json) — plain sub-folders belong to that server.
+            if (!hasPkg && taken.any { t -> d != t && (t.isEmpty() || d.startsWith("$t/")) }) continue
             val entry = entryCandidates.firstOrNull { has(it) } ?: continue
-            if (d.isNotEmpty() && !has("package.json") && entry != "server.js") continue
+            if (d.isNotEmpty() && !hasPkg && entry != "server.js") continue
             out.add(Found(d, entry))
             taken.add(d)
         }

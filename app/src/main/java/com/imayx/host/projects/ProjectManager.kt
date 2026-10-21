@@ -91,7 +91,9 @@ class ProjectManager(
         val hasNodeModules: Boolean,
         val skippedSecrets: List<String>,
         /** Every server folder found in the ZIP listing (>1 = multi-server ZIP). */
-        val servers: List<ServerScanner.Found> = emptyList()
+        val servers: List<ServerScanner.Found> = emptyList(),
+        /** [servers] turned into named/ported defs for the import dialog (editable ports). */
+        val defs: List<com.imayx.host.data.ServerDef> = emptyList()
     )
 
     /**
@@ -232,7 +234,11 @@ class ProjectManager(
         return tmp to ZipTools.inspect(tmp)
     }
 
-    fun importStaged(zip: File, info: ZipInfo, name: String, onProgress: ((Int, Int) -> Unit)? = null): ImportResult {
+    fun importStaged(
+        zip: File, info: ZipInfo, name: String,
+        defsOverride: List<com.imayx.host.data.ServerDef>? = null,
+        onProgress: ((Int, Int) -> Unit)? = null
+    ): ImportResult {
         requireValidName(name)
         if (!info.isSafe) {
             throw ProjectException(info.error ?: "ZIP contains unsafe paths and was rejected")
@@ -273,7 +279,18 @@ class ProjectManager(
                 if (it.dir.isEmpty()) it.entry else "${it.dir}/${it.entry}"
             } ?: detectServerEntry(dir)
             val cfg = if (found.isNotEmpty()) {
-                val defs = buildDefs(name, found)
+                val scanned = buildDefs(name, found)
+                // The import dialog's confirmed list wins for ports/enabled when it covers
+                // exactly the folders the real-file scan found; entry/name stay authoritative
+                // from the scan (the ZIP-listing preview cannot read package.json contents).
+                val defs = if (defsOverride != null &&
+                    defsOverride.map { it.dir }.toSet() == found.map { it.dir }.toSet()
+                ) {
+                    scanned.map { s ->
+                        val o = defsOverride.first { it.dir == s.dir }
+                        s.copy(port = o.port, enabled = o.enabled)
+                    }
+                } else scanned
                 for (d in defs) {
                     val sd = if (d.dir.isEmpty()) dir else File(dir, d.dir)
                     if (File(sd, "package.json").isFile && !ServerScanner.hasNodeModules(dir, sd)) {
@@ -327,27 +344,83 @@ class ProjectManager(
     }
 
     /**
-     * Re-detects the servers of an existing SERVER project (after the user edited/added folders).
-     * Keeps name/subdomain/port/enabled of servers that still exist (matched by folder).
+     * Names, ports and subdomains for [found] WITHOUT saving. Servers that already exist
+     * (matched by folder) keep their saved name/port/subdomain/enabled, so re-detecting
+     * never renumbers a working setup; new folders get fresh free ports.
      */
-    fun rescanServers(name: String, override: List<ServerScanner.Found>? = null): ProjectConfig {
-        val cfg = store.get(name) ?: throw ProjectException("Project not found")
-        val dir = store.projectDir(name)
-        val found = override ?: ServerScanner.scan(dir)
-        if (found.isEmpty()) throw ProjectException("No Node.js server found in this project")
+    fun previewDefs(name: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
         val fresh = buildDefs(name, found)
+        val cfg = store.get(name) ?: return fresh
         val merged = fresh.map { f ->
             val old = cfg.servers.firstOrNull { it.dir == f.dir }
-            if (old != null) f.copy(name = old.name, port = old.port, subdomain = old.subdomain, enabled = old.enabled, primary = old.primary) else f
+            if (old != null) f.copy(
+                name = old.name, port = old.port, subdomain = old.subdomain,
+                enabled = old.enabled, primary = old.primary
+            ) else f
         }
-        val prim = merged.firstOrNull { it.primary } ?: merged.first()
+        // buildDefs cannot see this project's SAVED ports, so a kept old port can collide
+        // with a port freshly assigned to a new folder. Resolve duplicates in list order:
+        // the earlier server keeps its port, the later one moves to the next free port.
+        val taken = store.list().filter { it.name != name }
+            .flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toMutableSet()
+        taken += setOf(3101, 3102)
+        var next = maxOf(settings.defaultPort, 3200)
+        return merged.map { d ->
+            if (taken.add(d.port)) d else {
+                while (next in taken || next == settings.primaryPort) next++
+                taken.add(next)
+                d.copy(port = next)
+            }
+        }
+    }
+
+    /** Saves [defs] as the project's server list (the project becomes a SERVER project). */
+    fun applyServers(name: String, defs: List<com.imayx.host.data.ServerDef>): ProjectConfig {
+        val cfg = store.get(name) ?: throw ProjectException("Project not found")
+        if (defs.isEmpty()) throw ProjectException("No Node.js server found in this project")
+        val prim = defs.firstOrNull { it.primary } ?: defs.first()
         val out = cfg.copy(
-            runtime = RuntimeType.SERVER, servers = merged,
+            runtime = RuntimeType.SERVER, servers = defs,
             entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
         )
         store.save(out)
-        LogBus.i(LogCategory.SYSTEM, "Rescanned $name: ${merged.size} server(s)")
+        LogBus.i(LogCategory.SYSTEM, "Servers saved for $name: ${defs.size} server(s)")
         return out
+    }
+
+    /**
+     * Re-detects the servers of an existing project (after the user edited/added folders).
+     * Keeps name/subdomain/port/enabled of servers that still exist (matched by folder).
+     */
+    fun rescanServers(name: String, override: List<ServerScanner.Found>? = null): ProjectConfig {
+        val dir = store.projectDir(name)
+        val found = override ?: ServerScanner.scan(dir)
+        if (found.isEmpty()) throw ProjectException("No Node.js server found in this project")
+        val out = applyServers(name, previewDefs(name, found))
+        LogBus.i(LogCategory.SYSTEM, "Rescanned $name: ${out.servers.size} server(s)")
+        return out
+    }
+
+    /**
+     * A SERVER project saved with an empty server list (e.g. the runtime was switched by
+     * hand): detect the real servers from the project files so the entry shown and run is
+     * the REAL path (e.g. backend/server.js), never the "server.js" placeholder default.
+     */
+    fun fillDetectedServers(cfg: ProjectConfig): ProjectConfig {
+        if (cfg.runtime != RuntimeType.SERVER || cfg.servers.isNotEmpty()) return cfg
+        val dir = store.projectDir(cfg.name)
+        if (!dir.isDirectory) return cfg
+        val found = ServerScanner.scan(dir)
+        if (found.isNotEmpty()) {
+            val defs = buildDefs(cfg.name, found)
+            val prim = defs.firstOrNull { it.primary } ?: defs.first()
+            return cfg.copy(
+                servers = defs,
+                entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
+            )
+        }
+        val entry = detectServerEntry(dir)
+        return if (entry != null) cfg.copy(entryFile = entry) else cfg
     }
 
     fun exportZip(name: String, out: OutputStream): Int {

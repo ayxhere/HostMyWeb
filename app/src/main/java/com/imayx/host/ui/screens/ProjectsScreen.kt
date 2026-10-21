@@ -49,6 +49,7 @@ import com.imayx.host.data.ProcessState
 import com.imayx.host.data.ProjectConfig
 import com.imayx.host.data.ProjectInfo
 import com.imayx.host.data.RuntimeType
+import com.imayx.host.data.ServerDef
 import com.imayx.host.graph
 import com.imayx.host.ui.components.BtnKind
 import com.imayx.host.ui.components.ConfirmDialog
@@ -91,6 +92,7 @@ fun ProjectsScreen(
     val host by vm.hostState.collectAsStateWithLifecycle()
     val stage by vm.stage.collectAsStateWithLifecycle()
     val imported by vm.imported.collectAsStateWithLifecycle()
+    val pendingDetection by vm.pendingDetection.collectAsStateWithLifecycle()
     val snack = LocalSnack.current
     val gate = LocalGate.current
     val lock = LocalContext.current.graph.appLock
@@ -276,8 +278,18 @@ fun ProjectsScreen(
             stage = st,
             existing = ui.items.map { it.config.name },
             onCancel = { vm.cancelImport() },
-            onImport = { name -> vm.confirmImport(name) },
+            onImport = { name, defs -> vm.confirmImport(name, defs) },
             busy = ui.busy != null
+        )
+    }
+
+    pendingDetection?.let { pd ->
+        DetectedServersDialog(
+            project = pd.project,
+            initial = pd.defs,
+            usedPorts = pd.usedPorts,
+            onConfirm = { vm.applyDetectedServers(it) },
+            onDismiss = { vm.clearPendingDetection() }
         )
     }
 
@@ -585,18 +597,102 @@ private fun CreateAdminDialog(onDismiss: () -> Unit, onConfirm: (String, String)
     )
 }
 
+/**
+ * Review dialog after a detection (Rescan / Detect servers (AI)): every detected server as
+ * "Server 1…N" with its REAL path and its auto-assigned port (editable). Nothing is saved
+ * until the user confirms; Cancel keeps the previous configuration untouched.
+ */
+@Composable
+private fun DetectedServersDialog(
+    project: String,
+    initial: List<ServerDef>,
+    usedPorts: Set<Int>,
+    onConfirm: (List<ServerDef>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val c = Ix.c
+    var defs by remember(initial) { mutableStateOf(initial) }
+    val enabledPorts = defs.filter { it.enabled }.map { it.port }
+    val err = when {
+        defs.any { it.port !in 1024..65535 } -> "Every server port must be between 1024 and 65535"
+        enabledPorts.toSet().size != enabledPorts.size -> "Two servers use the same port"
+        defs.any { it.enabled && it.port in usedPorts } -> "One of the ports is already used by another project"
+        else -> null
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.card,
+        titleContentColor = c.text,
+        textContentColor = c.soft,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+        title = { Text("Servers in \"$project\"") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "${defs.size} Node.js server(s) found. Ports were assigned automatically — " +
+                        "check them, then Save. Nothing changes until you save.",
+                    color = c.soft,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                defs.forEachIndexed { i, sv ->
+                    val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
+                    SwitchRow(
+                        "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
+                        sv.enabled,
+                        { v -> defs = defs.toMutableList().also { it[i] = sv.copy(enabled = v) } },
+                        subtitle = where
+                    )
+                    if (sv.enabled) {
+                        IxTextField(
+                            sv.port.toString(),
+                            { v ->
+                                defs = defs.toMutableList().also {
+                                    it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0)
+                                }
+                            },
+                            "Port",
+                            keyboardType = KeyboardType.Number,
+                            isError = sv.port !in 1024..65535 || sv.port in usedPorts,
+                            supportingText = when {
+                                sv.primary -> "Main server — the tunnel targets this one while hosted"
+                                sv.subdomain.isNotBlank() -> "Route: ${sv.subdomain}.<domain>"
+                                else -> null
+                            }
+                        )
+                    }
+                }
+                if (err != null) Text(err, color = c.danger, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            IxButton("Save servers", onClick = { onConfirm(defs) }, enabled = err == null && defs.any { it.enabled })
+        },
+        dismissButton = { IxButton("Cancel", onDismiss, kind = BtnKind.Ghost) }
+    )
+}
+
 @Composable
 private fun ImportDialog(
     stage: ImportStage,
     existing: List<String>,
     onCancel: () -> Unit,
-    onImport: (String) -> Unit,
+    onImport: (String, List<ServerDef>?) -> Unit,
     busy: Boolean
 ) {
     val c = Ix.c
     val info = stage.info
     var name by remember(stage) { mutableStateOf(stage.suggestedName) }
     val err = nameError(name) ?: if (existing.contains(name)) "A project with this name already exists" else null
+    // Detected servers with their auto-assigned ports — the user can fix a port before importing.
+    var defs by remember(stage) { mutableStateOf(stage.detection?.defs ?: emptyList()) }
+    val defsErr = when {
+        defs.any { it.port !in 1024..65535 } -> "Every server port must be between 1024 and 65535"
+        defs.map { it.port }.toSet().size != defs.size -> "Two servers use the same port"
+        else -> null
+    }
     AlertDialog(
         onDismissRequest = { if (!busy) onCancel() },
         containerColor = c.card,
@@ -619,7 +715,30 @@ private fun ImportDialog(
                 )
                 stage.detection?.let { d ->
                     KeyValueRow("Type", "Server (Node.js) — auto-detected", valueColor = c.ok)
-                    if (d.servers.size > 1) {
+                    if (defs.isNotEmpty()) {
+                        KeyValueRow(
+                            "Servers",
+                            "${defs.size} found — ports were assigned automatically, edit any port before importing",
+                            valueColor = c.ok
+                        )
+                        defs.forEachIndexed { i, sv ->
+                            val where = (if (sv.dir.isEmpty()) "(root) " else sv.dir + "/") + sv.entry
+                            KeyValueRow("Server ${i + 1}", "${sv.name}\n$where", mono = true)
+                            IxTextField(
+                                sv.port.toString(),
+                                { v ->
+                                    defs = defs.toMutableList().also {
+                                        it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0)
+                                    }
+                                },
+                                "Port",
+                                keyboardType = KeyboardType.Number,
+                                isError = sv.port !in 1024..65535,
+                                supportingText = if (sv.primary) "Main server (tunnel port)" else "Subdomain: ${sv.subdomain}"
+                            )
+                        }
+                        if (defsErr != null) Text(defsErr, color = c.danger, style = MaterialTheme.typography.bodySmall)
+                    } else if (d.servers.size > 1) {
                         KeyValueRow("Servers", "${d.servers.size} found — each gets its own port + subdomain", valueColor = c.ok)
                         d.servers.forEachIndexed { i, f ->
                             KeyValueRow("Server ${i + 1}", (if (f.dir.isEmpty()) "(root)" else f.dir + "/") + "  " + f.entry, mono = true)
@@ -680,7 +799,12 @@ private fun ImportDialog(
             }
         },
         confirmButton = {
-            IxButton("Import", onClick = { onImport(name.trim()) }, enabled = info.isSafe && err == null && !busy, loading = busy)
+            IxButton(
+                "Import",
+                onClick = { onImport(name.trim(), defs.ifEmpty { null }) },
+                enabled = info.isSafe && err == null && defsErr == null && !busy,
+                loading = busy
+            )
         },
         dismissButton = { IxButton("Cancel", onCancel, kind = BtnKind.Ghost, enabled = !busy) }
     )
@@ -764,7 +888,7 @@ private fun ConfigDialog(
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
                 } else if (runtime == RuntimeType.SERVER) {
                     if (servers.isEmpty()) {
-                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically.")
+                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically. On Save, the real entry is auto-detected from the project files — or use \"Detect servers (AI)\" below.")
                     } else {
                         Text("Servers in this project (${servers.size})", color = c.soft, style = MaterialTheme.typography.labelMedium)
                         servers.forEachIndexed { i, sv ->

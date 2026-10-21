@@ -8,6 +8,7 @@ import com.imayx.host.data.ProcessState
 import com.imayx.host.data.ProjectConfig
 import com.imayx.host.data.ProjectInfo
 import com.imayx.host.data.RuntimeType
+import com.imayx.host.data.ServerDef
 import com.imayx.host.graph
 import com.imayx.host.node.AyxBackendRuntime
 import com.imayx.host.projects.ProjectManager
@@ -42,6 +43,14 @@ data class ImportStage(
     val detection: ProjectManager.ServerDetection?
 )
 
+/** Detected servers waiting for the user's review (Server 1…N dialog) before anything is saved. */
+data class PendingDetection(
+    val project: String,
+    val defs: List<ServerDef>,
+    /** Ports used by OTHER projects (+ reserved 3101/3102) — the dialog flags collisions. */
+    val usedPorts: Set<Int>
+)
+
 class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     private val g = app.graph
 
@@ -61,6 +70,37 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     /** Result of the last one-off node script run; shown in a dialog, null when dismissed. */
     private val _scriptResult = MutableStateFlow<String?>(null)
     val scriptResult: StateFlow<String?> = _scriptResult
+
+    /** Servers found by the last detection, waiting for review in the Server 1…N dialog. */
+    private val _pendingDetection = MutableStateFlow<PendingDetection?>(null)
+    val pendingDetection: StateFlow<PendingDetection?> = _pendingDetection
+
+    fun clearPendingDetection() {
+        _pendingDetection.value = null
+    }
+
+    /** The user confirmed the Server 1…N dialog — save exactly the list they reviewed. */
+    fun applyDetectedServers(defs: List<ServerDef>) {
+        val pd = _pendingDetection.value ?: return
+        _pendingDetection.value = null
+        viewModelScope.launch {
+            try {
+                val cfg = withContext(Dispatchers.IO) { g.projects.applyServers(pd.project, defs) }
+                _messages.emit(
+                    "${pd.project}: ${cfg.servers.size} server(s) saved — " +
+                        cfg.servers.joinToString { "${it.name} :${it.port}" }
+                )
+            } catch (e: Exception) {
+                _messages.emit(e.message ?: "Could not save servers")
+            } finally {
+                refresh()
+            }
+        }
+    }
+
+    private fun usedPortsExcluding(name: String): Set<Int> =
+        g.projects.list().filter { it.name != name }
+            .flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toSet() + setOf(3101, 3102)
 
     fun clearScriptResult() {
         _scriptResult.value = null
@@ -233,7 +273,16 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
             _messages.tryEmit("Project settings saved")
         }
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { g.projects.save(cfg) }
+            // A SERVER project with no server list gets its REAL entry auto-detected
+            // from the files — the entry field must never stay a "server.js" guess.
+            val filled = withContext(Dispatchers.IO) { g.projects.fillDetectedServers(cfg) }
+            if (filled.servers.isNotEmpty() && cfg.servers.isEmpty()) {
+                _messages.emit(
+                    "Detected ${filled.servers.size} server(s) in ${cfg.name}: " +
+                        filled.servers.joinToString { "${it.name} :${it.port}" }
+                )
+            }
+            withContext(Dispatchers.IO) { g.projects.save(filled) }
             refresh()
         }
     }
@@ -248,9 +297,13 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val stage = withContext(Dispatchers.IO) {
                     val (file, info) = g.projects.stageZip(uri)
+                    val suggested = g.projects.suggestName(uri)
+                    val det = g.projects.analyzeZipForServer(info)
                     ImportStage(
-                        file, info, g.projects.displayName(uri), g.projects.suggestName(uri),
-                        g.projects.analyzeZipForServer(info)
+                        file, info, g.projects.displayName(uri), suggested,
+                        if (det != null && det.servers.isNotEmpty())
+                            det.copy(defs = g.projects.previewDefs(suggested, det.servers))
+                        else det
                     )
                 }
                 _stage.value = stage
@@ -267,13 +320,13 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         _stage.value = null
     }
 
-    fun confirmImport(name: String) {
+    fun confirmImport(name: String, defsOverride: List<ServerDef>? = null) {
         val st = _stage.value ?: return
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = "Importing…", progress = 0f)
             try {
                 val result = withContext(Dispatchers.IO) {
-                    g.projects.importStaged(st.file, st.info, name) { done, total ->
+                    g.projects.importStaged(st.file, st.info, name, defsOverride = defsOverride) { done, total ->
                         if (total > 0) _ui.value = _ui.value.copy(progress = done.toFloat() / total)
                     }
                 }
@@ -314,37 +367,44 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Re-detect the servers (and ports) of a project. The normal scanner runs first; when it finds nothing
-     * (or [useAi] is set) Groq reads the file tree and package.json files and names the servers.
+     * Re-detect the servers of a project. The local scanner ALWAYS runs first (it verifies
+     * against real files); when [useAi] is set — or the scanner finds nothing — Groq also
+     * reads the project and its folders are UNIONED in (the local result wins per folder).
+     * Nothing is saved yet: the result opens the Server 1…N review dialog, where the user
+     * checks the auto-assigned ports and confirms. A project with no server anywhere still
+     * reports "no server found" — a static site never gets a fabricated server.
      */
     fun rescanServers(name: String, useAi: Boolean = false) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = "Scanning $name…")
             try {
-                var cfg: ProjectConfig? = null
-                if (!useAi) {
-                    cfg = try {
-                        withContext(Dispatchers.IO) { g.projects.rescanServers(name) }
-                    } catch (_: com.imayx.host.projects.ProjectException) {
-                        null
+                val dir = g.projectStore.projectDir(name)
+                var found = withContext(Dispatchers.IO) { com.imayx.host.projects.ServerScanner.scan(dir) }
+                var aiRan = false
+                if (useAi || found.isEmpty()) {
+                    if (com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
+                        _ui.value = _ui.value.copy(busy = "AI reading $name…")
+                        val ai = com.imayx.host.ai.AiFixer.detectServers(
+                            getApplication<Application>(), g.settings, g.secrets, dir
+                        )
+                        aiRan = true
+                        if (ai.isNotEmpty()) {
+                            val byDir = LinkedHashMap<String, com.imayx.host.projects.ServerScanner.Found>()
+                            for (f in ai) byDir[f.dir] = f
+                            for (f in found) byDir[f.dir] = f
+                            found = byDir.values.toList()
+                        }
                     }
                 }
-                if (cfg == null) {
-                    if (!com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
-                        _messages.emit("No server found. Add a Groq API key (Settings → AI auto-fix), then use Detect servers (AI).")
-                        return@launch
-                    }
-                    _ui.value = _ui.value.copy(busy = "AI reading $name…")
-                    val found = com.imayx.host.ai.AiFixer.detectServers(
-                        getApplication<Application>(), g.settings, g.secrets, g.projectStore.projectDir(name)
+                if (found.isEmpty()) {
+                    _messages.emit(
+                        if (aiRan) "AI also found no Node.js server in $name. Check the folder in Files."
+                        else "No server found. Add a Groq API key (Settings → AI auto-fix), then use Detect servers (AI)."
                     )
-                    if (found.isEmpty()) {
-                        _messages.emit("AI also found no Node.js server in $name. Check the folder in Files.")
-                        return@launch
-                    }
-                    cfg = withContext(Dispatchers.IO) { g.projects.rescanServers(name, found) }
+                    return@launch
                 }
-                _messages.emit("$name: ${cfg.servers.size} server(s) — " + cfg.servers.joinToString { "${it.name} :${it.port}" })
+                val defs = withContext(Dispatchers.IO) { g.projects.previewDefs(name, found) }
+                _pendingDetection.value = PendingDetection(name, defs, usedPortsExcluding(name))
             } catch (e: Exception) {
                 if (e !is CancellationException) _messages.emit(e.message ?: "Scan failed")
             } finally {
