@@ -16,7 +16,7 @@ file manager, code editor, backups, app lock.
 - Go builds of cloudflared may fail DNS on Android (no `/etc/resolv.conf`). Use an Android-compatible build via Settings → custom URL if so.
 
 ## Features
-Dashboard · Projects (SAF ZIP import/export, Zip-Slip safe) · Files · Editor · Cloudflare (quick/named tunnel, API token, DNS/routes, connection test) · Logs (redacted) · Backups · Settings · App Lock (PIN/biometric) · Preview (WebView).
+Dashboard · Projects (SAF ZIP import/export, Zip-Slip safe) · Files · Editor · Cloudflare (quick/named tunnel, API token, DNS/routes, connection test) · Logs (redacted) · Backups · Settings · App Lock (PIN/biometric) · Preview (WebView) · PentAGI (remote Docker AI security platform, managed from the PentAGI tab — see [PENTAGI_INTEGRATION.md](PENTAGI_INTEGRATION.md); PentAGI itself runs on a Linux/Docker host, not on the phone).
 
 ## Security
 Tokens are AES-GCM encrypted with the Android Keystore, redacted from every log, excluded from backups and project folders. Server binds to 127.0.0.1 only.

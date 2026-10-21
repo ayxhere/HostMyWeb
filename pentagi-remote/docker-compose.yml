@@ -1,0 +1,92 @@
+# PentAGI — minimal faithful subset of the official compose file.
+# Source: https://github.com/vxcontrol/pentagi/blob/master/docker-compose.yml
+# Official images only. Bind PentAGI to localhost by default; expose it via a
+# reverse proxy / Tailscale / Cloudflare Tunnel with real TLS — never raw.
+#
+# Usage: cp .env.example .env && fill in keys, then: docker compose up -d
+
+services:
+  pentagi:
+    image: vxcontrol/pentagi:latest
+    container_name: pentagi
+    restart: unless-stopped
+    environment:
+      - INSTALL_ID=${INSTALL_ID:-}
+      - OPEN_AI_KEY=${OPEN_AI_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - BEDROCK_ACCESS_KEY_ID=${BEDROCK_ACCESS_KEY_ID:-}
+      - BEDROCK_SECRET_ACCESS_KEY=${BEDROCK_SECRET_ACCESS_KEY:-}
+      - BEDROCK_REGION=${BEDROCK_REGION:-}
+      - BEDROCK_DEFAULT_MODEL=${BEDROCK_DEFAULT_MODEL:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_SERVER_URL=${DEEPSEEK_SERVER_URL:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-}
+      - OLLAMA_SERVER_URL=${OLLAMA_SERVER_URL:-}
+      - OLLAMA_SERVER_MODEL=${OLLAMA_SERVER_MODEL:-}
+      - LLM_SERVER_URL=${LLM_SERVER_URL:-}
+      - LLM_SERVER_KEY=${LLM_SERVER_KEY:-}
+      - LLM_SERVER_MODEL=${LLM_SERVER_MODEL:-}
+      - DATABASE_URL=${DATABASE_URL:-postgres://pentagi:${PENTAGI_POSTGRES_PASSWORD:-pentagi}@pgvector:5432/${PENTAGI_POSTGRES_DB:-pentagidb}?sslmode=disable}
+      - COOKIE_SIGNING_SALT=${COOKIE_SIGNING_SALT:-}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - SERVER_PORT=8443
+      - SERVER_USE_SSL=${SERVER_USE_SSL:-true}
+      - SCRAPER_PUBLIC_URL=${SCRAPER_PUBLIC_URL:-}
+      - PENTAGI_POSTGRES_USER=${PENTAGI_POSTGRES_USER:-pentagi}
+      - PENTAGI_POSTGRES_PASSWORD=${PENTAGI_POSTGRES_PASSWORD:-}
+      - PENTAGI_POSTGRES_DB=${PENTAGI_POSTGRES_DB:-pentagidb}
+    ports:
+      - "${PENTAGI_LISTEN_IP:-127.0.0.1}:${PENTAGI_LISTEN_PORT:-8443}:8443"
+    volumes:
+      - pentagi-data:/opt/pentagi/data
+      - pentagi-ssl:/opt/pentagi/ssl
+      # PentAGI spawns agent sandbox containers through the host Docker daemon.
+      # This is why PentAGI requires a real Linux Docker host.
+      - /var/run/docker.sock:/var/run/docker.sock
+    user: root
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    networks:
+      - pentagi-network
+
+  pgvector:
+    image: vxcontrol/pgvector:latest
+    container_name: pgvector
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${PENTAGI_POSTGRES_USER:-pentagi}
+      - POSTGRES_PASSWORD=${PENTAGI_POSTGRES_PASSWORD:-}
+      - POSTGRES_DB=${PENTAGI_POSTGRES_DB:-pentagidb}
+    volumes:
+      - pentagi-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PENTAGI_POSTGRES_USER:-pentagi} -d ${PENTAGI_POSTGRES_DB:-pentagidb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - pentagi-network
+
+  scraper:
+    image: vxcontrol/scraper:latest
+    container_name: scraper
+    restart: unless-stopped
+    environment:
+      - SCRAPER_LISTEN_PORT=9443
+    expose:
+      - "9443"
+    networks:
+      - pentagi-network
+
+volumes:
+  pentagi-data:
+  pentagi-ssl:
+  pentagi-postgres-data:
+  pentagi-ollama:
+
+networks:
+  pentagi-network:
+    driver: bridge

@@ -11,6 +11,7 @@ import com.imayx.host.data.LogBus
 import com.imayx.host.data.LogCategory
 import com.imayx.host.data.ProjectStore
 import com.imayx.host.domain.HostController
+import com.imayx.host.pentagi.PentagiManager
 import com.imayx.host.projects.ProjectManager
 import com.imayx.host.runtime.NodeInstaller
 import com.imayx.host.runtime.ProcessRegistry
@@ -35,6 +36,7 @@ class AppGraph(val app: Application) {
     val nodeInstaller = NodeInstaller(app)
     val runtimes = RuntimeManager(app, projectStore, secrets, nodeInstaller, registry)
     val host = HostController(app, settings, projectStore, runtimes, tunnel, secrets, backups, cloudflareApi)
+    val pentagi = PentagiManager(app, settings, secrets, projectStore)
     val monitor = ResourceMonitor(app)
 }
 

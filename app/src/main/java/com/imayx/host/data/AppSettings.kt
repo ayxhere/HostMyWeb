@@ -180,4 +180,45 @@ class AppSettings(context: Context) {
             prefs.edit().putBoolean("net_watch", v).apply()
             bump()
         }
+
+    // ---- PentAGI (remote Docker deployment, managed from the PentAGI tab) ----
+
+    var pentagiEnabled: Boolean
+        get() = prefs.getBoolean("pentagi_enabled", false)
+        set(v) {
+            prefs.edit().putBoolean("pentagi_enabled", v).apply()
+            bump()
+        }
+
+    /** Public/private URL of the PentAGI web UI, e.g. https://vps.example.com:8443 */
+    var pentagiRemoteUrl: String
+        get() = prefs.getString("pentagi_remote_url", "") ?: ""
+        set(v) {
+            prefs.edit().putString("pentagi_remote_url", v.trim()).apply()
+            bump()
+        }
+
+    /** URL of the pentagi-remote manager service, e.g. http://100.x.y.z:8787 (via Tailscale/SSH tunnel). */
+    var pentagiManagerUrl: String
+        get() = prefs.getString("pentagi_manager_url", "") ?: ""
+        set(v) {
+            prefs.edit().putString("pentagi_manager_url", v.trim()).apply()
+            bump()
+        }
+
+    /** LLM provider id: openai | anthropic | gemini | deepseek | ollama | custom (see PentagiLlmProvider). */
+    var pentagiLlmProvider: String
+        get() = prefs.getString("pentagi_llm_provider", "openai") ?: "openai"
+        set(v) {
+            prefs.edit().putString("pentagi_llm_provider", v.trim().lowercase()).apply()
+            bump()
+        }
+
+    /** PUBLIC_URL configured on the remote PentAGI instance (informational / setup checklist). */
+    var pentagiPublicUrl: String
+        get() = prefs.getString("pentagi_public_url", "") ?: ""
+        set(v) {
+            prefs.edit().putString("pentagi_public_url", v.trim()).apply()
+            bump()
+        }
 }

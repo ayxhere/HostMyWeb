@@ -1,6 +1,6 @@
 package com.imayx.host.data
 
-enum class RuntimeType { STATIC, NODE, SERVER }
+enum class RuntimeType { STATIC, NODE, SERVER, PENTAGI }
 
 enum class ProcessState { STOPPED, STARTING, RUNNING, FAILED }
 
@@ -9,6 +9,7 @@ enum class LogCategory(val label: String) {
     CLOUDFLARE("Cloudflare"),
     NODE("Node"),
     SYSTEM("System"),
+    PENTAGI("PentAGI"),
     ERRORS("Errors")
 }
 

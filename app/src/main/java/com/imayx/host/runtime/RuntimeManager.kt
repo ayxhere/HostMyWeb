@@ -317,6 +317,7 @@ class RuntimeManager(
         // SERVER projects run on the embedded node (:node_server process) via
         // ServerRuntime — they never go through a ProjectRuntime instance.
         RuntimeType.SERVER -> throw IllegalArgumentException("SERVER projects are managed by ServerRuntime, not a ProjectRuntime")
+        RuntimeType.PENTAGI -> throw IllegalArgumentException("PENTAGI projects are managed remotely via the PentAGI tab, not a local runtime")
     }
 
     /** A brand-new runtime instance, so several projects can run side by side (multi-start). */
@@ -324,5 +325,6 @@ class RuntimeManager(
         RuntimeType.STATIC -> StaticRuntime(store)
         RuntimeType.NODE -> NodeRuntime(context, store, secrets, nodeInstaller, registry)
         RuntimeType.SERVER -> throw IllegalArgumentException("SERVER projects are managed by ServerRuntime, not a ProjectRuntime")
+        RuntimeType.PENTAGI -> throw IllegalArgumentException("PENTAGI projects are managed remotely via the PentAGI tab, not a local runtime")
     }
 }

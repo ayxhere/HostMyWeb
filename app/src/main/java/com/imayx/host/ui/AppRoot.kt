@@ -54,6 +54,7 @@ import com.imayx.host.ui.screens.GateDialog
 import com.imayx.host.ui.screens.LocalGate
 import com.imayx.host.ui.screens.LockScreen
 import com.imayx.host.ui.screens.LogsScreen
+import com.imayx.host.ui.screens.PentagiScreen
 import com.imayx.host.ui.screens.PreviewScreen
 import com.imayx.host.ui.screens.ProjectsScreen
 import com.imayx.host.ui.screens.SettingsScreen
@@ -122,6 +123,7 @@ private fun MainShell() {
                         Screen.Files -> FilesScreen(onOpenEditor = { current = Screen.Editor.name })
                         Screen.Editor -> EditorScreen(onOpenFiles = { current = Screen.Files.name })
                         Screen.Cloudflare -> CloudflareScreen()
+                        Screen.PentAGI -> PentagiScreen()
                         Screen.Logs -> LogsScreen()
                         Screen.Backups -> BackupsScreen()
                         Screen.Settings -> SettingsScreen()

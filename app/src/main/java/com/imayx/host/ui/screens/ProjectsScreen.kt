@@ -433,6 +433,7 @@ private fun ProjectCard(
                             RuntimeType.STATIC -> "STATIC"
                             RuntimeType.NODE -> "NODE"
                             RuntimeType.SERVER -> "SERVER"
+                            RuntimeType.PENTAGI -> "PENTAGI"
                         }, c.accent
                     )
                     if (isActive) StatusPill("ACTIVE", c.ok)

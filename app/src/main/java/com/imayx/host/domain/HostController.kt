@@ -286,6 +286,13 @@ class HostController(
     }
 
     private fun startExtra(cfg: ProjectConfig) {
+        // PENTAGI projects are remote-only (Docker on a Linux host) — never a local runtime.
+        if (cfg.runtime == RuntimeType.PENTAGI) {
+            val msg = "${cfg.name}: PentAGI runs on a remote Linux/Docker host — open the PentAGI tab to manage it."
+            LogBus.e(LogCategory.PENTAGI, msg)
+            _notices.tryEmit(msg)
+            return
+        }
         // SERVER projects share the single embedded node process — they are
         // collected and (re)started together, not given their own runtime.
         if (cfg.runtime == RuntimeType.SERVER) {
@@ -396,6 +403,12 @@ class HostController(
         activeConfig = effective
         _state.value = HostState(ProcessState.STARTING, cfg.name, cfg.runtime, effective.port)
         LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${cfg.runtime} port=${effective.port}")
+
+        // PENTAGI primary: remote-only — fail with guidance instead of trying a local runtime.
+        if (cfg.runtime == RuntimeType.PENTAGI) {
+            failStart(effective, "PentAGI cannot run on this device (it needs a Docker daemon on Linux). Open the PentAGI tab to manage the remote deployment.")
+            return
+        }
 
         // SERVER primary: runs on the embedded node (:node_server process), no ProjectRuntime.
         if (cfg.runtime == RuntimeType.SERVER) {
