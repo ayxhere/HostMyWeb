@@ -242,19 +242,24 @@ class HostController(
 
     /**
      * Cloudflare auto-routing: every server with a subdomain (api/ -> api.<domain>) gets an ingress
-     * route to its own 127.0.0.1:<port> + a proxied CNAME. Only for NAMED tunnels with an API token.
-     * Runs in the background; never blocks or fails hosting.
+     * route to its own 127.0.0.1:<port> + a proxied CNAME, and `api.<domain>` always routes to the
+     * API backend (explicit api server, else the primary server — the combined site+backend shape
+     * serves /v1 on the tunnel-target port — else the built-in AyX backend). Only for NAMED
+     * tunnels with an API token. Runs in the background; never blocks or fails hosting.
      */
     private fun syncRoutes(specs: List<ServerRuntime.ServerSpec>) {
         if (settings.quickTunnel || !settings.autoRoutes) return
-        val wanted = ArrayList<Pair<String, Int>>()
-        for (sp in specs) {
-            val sub = sp.subdomain
-            if (sub.isNullOrBlank()) continue
-            val base = (store.get(sp.project)?.domain?.ifBlank { null } ?: settings.defaultDomain).trim().lowercase()
-            if (base.isBlank()) continue
-            wanted.add("$sub.$base" to sp.port)
+        val infos = specs.map { sp ->
+            com.imayx.host.cloudflare.RouteSync.ServerRouteInfo(
+                subdomain = sp.subdomain,
+                port = sp.port,
+                baseDomain = store.get(sp.project)?.domain.orEmpty()
+            )
         }
+        val wanted = com.imayx.host.cloudflare.RouteSync.wantedRoutes(
+            infos, settings.defaultDomain, settings.ayxBackendEnabled,
+            com.imayx.host.node.AyxBackendRuntime.PORT
+        )
         if (wanted.isEmpty()) return
         scope.launch {
             val report = try {
