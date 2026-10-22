@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.imayx.host.ai.AiFixer
+import com.imayx.host.ai.AiProvider
 import com.imayx.host.data.ThemeMode
 import com.imayx.host.graph
 import com.imayx.host.utils.PathUtil
@@ -15,6 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+/** Last Settings "Test" outcome for one AI provider. */
+data class SettingsAiTest(val ok: Boolean, val text: String)
 
 data class SettingsUi(
     val theme: ThemeMode = ThemeMode.AMOLED,
@@ -39,8 +44,17 @@ data class SettingsUi(
     val lockEnabled: Boolean = false,
     val biometric: Boolean = false,
     val aiAutoFix: Boolean = false,
-    val aiModel: String = "openai/gpt-oss-120b",
-    val hasGroqKey: Boolean = false,
+    /** Provider id tried first by the AI fixer ("groq" / "google" / "openrouter"). */
+    val aiActiveProvider: String = "groq",
+    /** provider id -> selected model */
+    val aiModels: Map<String, String> = emptyMap(),
+    /** provider id -> has a saved API key */
+    val aiHasKey: Map<String, Boolean> = emptyMap(),
+    val hasAnyAiKey: Boolean = false,
+    /** Provider id currently being tested (null = idle). */
+    val aiTestBusy: String? = null,
+    /** provider id -> last Test result */
+    val aiTestResults: Map<String, SettingsAiTest> = emptyMap(),
     val batteryUnrestricted: Boolean = false,
     val projectsBytes: Long = 0,
     val backupsBytes: Long = 0,
@@ -64,8 +78,10 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             startOnBoot = s.startOnBoot, ayxBackend = s.ayxBackendEnabled, autoRoutes = s.autoRoutes, netWatch = s.netWatch, notifications = s.notificationsEnabled, autosave = s.autosave,
             cloudflaredUrl = s.cloudflaredUrl, nodeUrl = s.nodeRuntimeUrl,
             lockEnabled = g.appLock.isEnabled(), biometric = g.appLock.isBiometricEnabled(),
-            aiAutoFix = s.aiAutoFix, aiModel = s.aiModel,
-            hasGroqKey = !g.secrets.get(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY).isNullOrBlank(),
+            aiAutoFix = s.aiAutoFix, aiActiveProvider = s.aiActiveProvider,
+            aiModels = AiProvider.entries.associate { it.id to s.aiModelFor(it.id, it.defaultModels.first()) },
+            aiHasKey = AiProvider.entries.associate { it.id to !g.secrets.get(it.secretKeyName).isNullOrBlank() },
+            hasAnyAiKey = AiProvider.entries.any { !g.secrets.get(it.secretKeyName).isNullOrBlank() },
             batteryUnrestricted = com.imayx.host.service.HostService.isBatteryUnrestricted(app)
         )
         viewModelScope.launch {
@@ -105,20 +121,42 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setCloudflaredUrl(v: String) { g.settings.cloudflaredUrl = v; refresh() }
     fun setNodeUrl(v: String) { g.settings.nodeRuntimeUrl = v; refresh() }
     fun setAiAutoFix(v: Boolean) { g.settings.aiAutoFix = v; refresh() }
-    fun setAiModel(v: String) { g.settings.aiModel = v; refresh() }
 
-    /** Stores the Groq API key encrypted in the Keystore-backed SecretStore. */
-    fun saveGroqKey(key: String): Boolean {
+    /** The provider the AI fixer tries first; the others follow in failover order. */
+    fun setAiActiveProvider(provider: AiProvider) { g.settings.aiActiveProvider = provider.id; refresh() }
+
+    fun setAiModel(provider: AiProvider, v: String) { g.settings.setAiModelFor(provider.id, v); refresh() }
+
+    /** Stores one provider's API key encrypted in the Keystore-backed SecretStore. */
+    fun saveAiKey(provider: AiProvider, key: String): Boolean {
         val clean = key.trim()
         if (clean.isBlank()) return false
-        val ok = g.secrets.put(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY, clean)
+        val ok = g.secrets.put(provider.secretKeyName, clean)
         refresh()
         return ok
     }
 
-    fun clearGroqKey() {
-        g.secrets.remove(com.imayx.host.security.SecretStore.KEY_GROQ_API_KEY)
+    fun clearAiKey(provider: AiProvider) {
+        g.secrets.remove(provider.secretKeyName)
         refresh()
+    }
+
+    /**
+     * Tests one provider (selected model, then its defaults). The first model
+     * that answers is auto-selected by [AiFixer.testProvider]; the outcome is
+     * kept per provider so each provider page shows its own result.
+     */
+    fun testAiProvider(provider: AiProvider) {
+        if (_ui.value.aiTestBusy != null) return
+        _ui.value = _ui.value.copy(aiTestBusy = provider.id)
+        viewModelScope.launch {
+            val r = AiFixer.testProvider(g.settings, g.secrets, provider)
+            _ui.value = _ui.value.copy(
+                aiTestBusy = null,
+                aiTestResults = _ui.value.aiTestResults + (provider.id to SettingsAiTest(r.ok, r.message))
+            )
+            refresh()
+        }
     }
 
     fun setPin(pin: String) {

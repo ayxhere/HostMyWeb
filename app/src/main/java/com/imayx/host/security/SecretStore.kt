@@ -22,6 +22,8 @@ class SecretStore(context: Context) {
         const val KEY_TUNNEL_TOKEN = "cf_tunnel_token"
         const val KEY_API_TOKEN = "cf_api_token"
         const val KEY_GROQ_API_KEY = "groq_api_key"
+        const val KEY_GOOGLE_API_KEY = "google_api_key"
+        const val KEY_OPENROUTER_API_KEY = "openrouter_api_key"
         const val KEY_PENTAGI_MANAGER_TOKEN = "pentagi_manager_token"
         const val KEY_PENTAGI_API_TOKEN = "pentagi_api_token"
         const val KEY_PENTAGI_LLM_KEY = "pentagi_llm_key"

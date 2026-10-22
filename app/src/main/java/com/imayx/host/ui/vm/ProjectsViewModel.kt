@@ -410,7 +410,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
                 if (found.isEmpty()) {
                     _messages.emit(
                         if (aiRan) "AI also found no Node.js server in $name. Check the folder in Files."
-                        else "No server found. Add a Groq API key (Settings → AI auto-fix), then use Detect servers (AI)."
+                        else "No server found. Add an AI API key (Settings → AI), then use Detect servers (AI)."
                     )
                     return@launch
                 }
@@ -442,7 +442,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun aiFix(name: String) {
         val app = getApplication<Application>()
         if (!com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
-            viewModelScope.launch { _messages.emit("Add a Groq API key first: Settings → AI auto-fix") }
+            viewModelScope.launch { _messages.emit("Add an AI API key first: Settings → AI (Groq, Google Gemini or OpenRouter)") }
             return
         }
         _ui.value = _ui.value.copy(busy = "AI fixing $name…")

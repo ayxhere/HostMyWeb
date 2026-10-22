@@ -149,7 +149,7 @@ class AppSettings(context: Context) {
             bump()
         }
 
-    /** AI auto-fix: when a hosted server crashes, Groq diagnoses the logs and patches the project automatically. */
+    /** AI auto-fix: when a hosted server crashes, the AI diagnoses the logs and patches the project automatically. */
     var aiAutoFix: Boolean
         get() = prefs.getBoolean("ai_autofix", false)
         set(v) {
@@ -176,6 +176,34 @@ class AppSettings(context: Context) {
             prefs.edit().putString("ai_model", v.trim().ifBlank { "openai/gpt-oss-120b" }).apply()
             bump()
         }
+
+    /** Which AI provider the fixer tries FIRST (failover then walks the rest in enum order). Stored as the provider id ("groq" / "google" / "openrouter"). */
+    var aiActiveProvider: String
+        get() = prefs.getString("ai_provider", "groq")?.trim()?.ifBlank { "groq" } ?: "groq"
+        set(v) {
+            prefs.edit().putString("ai_provider", v.trim().ifBlank { "groq" }).apply()
+            bump()
+        }
+
+    /**
+     * Selected model for one AI provider. Groq keeps the legacy "ai_model" key
+     * (with its self-heal remap in [aiModel]); the other providers use
+     * "ai_model_<id>" and fall back to [defaultModel] when unset.
+     */
+    fun aiModelFor(providerId: String, defaultModel: String): String {
+        if (providerId == "groq") return aiModel
+        val stored = prefs.getString("ai_model_$providerId", null)?.trim().orEmpty()
+        return stored.ifBlank { defaultModel }
+    }
+
+    fun setAiModelFor(providerId: String, model: String) {
+        if (providerId == "groq") {
+            aiModel = model
+            return
+        }
+        prefs.edit().putString("ai_model_$providerId", model.trim()).apply()
+        bump()
+    }
 
     /** Push Cloudflare tunnel routes + DNS for each server's subdomain automatically (named tunnel + API token). */
     var autoRoutes: Boolean

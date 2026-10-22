@@ -14,7 +14,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Groq-powered auto-fixer for hosted SERVER (Node.js) projects.
+ * Multi-provider AI auto-fixer for hosted SERVER (Node.js) projects.
+ *
+ * Providers: Groq, Google Gemini and OpenRouter (see [AiProvider]) — all speak
+ * the OpenAI chat format, so one client serves all three. Every call fails over
+ * automatically: the active provider first (its selected model, then its other
+ * default models), then the remaining providers the same way.
  *
  * Two entry points:
  *  - Manual: user taps "AI Fix" on a server project card.
@@ -27,12 +32,14 @@ import java.net.URL
  *    (path traversal is rejected).
  *  - A full backup ZIP is created before any edit (restorable from Settings → Backups).
  *  - At most [MAX_EDITS] files and [MAX_FILE_BYTES] per file per run.
- *  - The Groq API key lives in the Keystore-backed [SecretStore], never in logs
- *    (it is registered with the log redactor).
+ *  - The API keys live in the Keystore-backed [SecretStore], never in logs
+ *    (they are registered with the log redactor).
  */
 object AiFixer {
-    private const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
     private const val MAX_EDITS = 10
+    private const val FIX_MAX_TOKENS = 8000
+    private const val TEST_MAX_TOKENS = 16
+    private const val TEST_SYSTEM = "You are a connectivity test inside an Android app. Reply with strict JSON only: {\"ok\":true}"
     private const val MAX_FILE_BYTES = 200 * 1024
     private const val MAX_LOG_CHARS = 6000
     /** File-tree budget for AI prompts. Was 80 — a real bundle (site + backend +
@@ -50,11 +57,16 @@ object AiFixer {
         val backupName: String?,
         /** Short "where": file:line (or entry) the error pointed at. */
         val where: String = "",
-        val files: List<String> = emptyList()
+        val files: List<String> = emptyList(),
+        /** "Provider · model" that produced the reply ("" when no call was made). */
+        val via: String = ""
     )
 
-    fun isConfigured(secrets: SecretStore): Boolean =
-        !secrets.get(SecretStore.KEY_GROQ_API_KEY).isNullOrBlank()
+    /** Providers that currently have an API key saved. */
+    fun configuredProviders(secrets: SecretStore): List<AiProvider> =
+        AiProvider.entries.filter { !secrets.get(it.secretKeyName).isNullOrBlank() }
+
+    fun isConfigured(secrets: SecretStore): Boolean = configuredProviders(secrets).isNotEmpty()
 
     fun lastAutoFix(settings: AppSettings, project: String): Long =
         settings.prefsLong("aifix_last_$project", 0L)
@@ -80,7 +92,7 @@ object AiFixer {
     ): FixResult? {
         if (!settings.aiAutoFix) return null
         if (!isConfigured(secrets)) {
-            LogBus.w(LogCategory.NODE, "AI auto-fix skipped for $projectName: no Groq API key in Settings")
+            LogBus.w(LogCategory.NODE, "AI auto-fix skipped for $projectName: no AI API key in Settings")
             return null
         }
         val cdKey = spec?.name ?: projectName
@@ -108,9 +120,8 @@ object AiFixer {
         logOverride: String? = null
     ): FixResult = withContext(Dispatchers.IO) {
         val label = spec?.name ?: projectName
-        val key = secrets.get(SecretStore.KEY_GROQ_API_KEY)
-        if (key.isNullOrBlank()) {
-            return@withContext FixResult(false, "No Groq API key. Add one in Settings → AI auto-fix.", 0, null)
+        if (!isConfigured(secrets)) {
+            return@withContext FixResult(false, "No AI API key. Add one in Settings → AI (Groq, Google Gemini or OpenRouter).", 0, null)
         }
         val projectDir = projectStore.projectDir(projectName)
         if (!projectDir.isDirectory) {
@@ -135,19 +146,20 @@ object AiFixer {
             val where = refs.firstOrNull()?.let { "${it.first}:${it.second}" } ?: (entry ?: "unknown")
             val issue = firstErrorLine(logs)
 
-            onProgress("Asking Groq…")
-            val reply = chat(
-                key, settings.aiModel,
+            onProgress("Asking AI…")
+            val outcome = chat(
+                settings, secrets,
                 SYSTEM_PROMPT,
                 buildUserMessage(label, reason, tree, pkg, entry, entrySrc, logs) +
                     (if (extra.isNotEmpty()) "\nOther files referenced by the error:$extra" else "")
             )
-            val parsed = parseReply(reply)
+            val via = "${outcome.provider.label} · ${outcome.model}"
+            val parsed = parseReply(outcome.reply)
 
             if (parsed.edits.isEmpty()) {
-                val summary = "Groq analysis: ${parsed.analysis.take(500)} (no file edits suggested)"
+                val summary = "${outcome.provider.label} analysis: ${parsed.analysis.take(500)} (no file edits suggested)"
                 LogBus.i(LogCategory.NODE, "AI fix for $label: $summary")
-                val r = FixResult(true, summary, 0, null, where)
+                val r = FixResult(true, summary, 0, null, where, via = via)
                 postResult(ctx, label, where, issue, r)
                 return@withContext r
             }
@@ -189,7 +201,7 @@ object AiFixer {
                 if (parsed.notes.isNotBlank()) append(" Notes: ${parsed.notes.take(300)}")
             }
             LogBus.i(LogCategory.NODE, "AI fix for $label done: $summary (backup ${backup.file.name})")
-            val r = FixResult(true, summary, applied, backup.file.name, where, written)
+            val r = FixResult(true, summary, applied, backup.file.name, where, written, via)
             postResult(ctx, label, where, issue, r)
             r
         } catch (e: Exception) {
@@ -211,6 +223,7 @@ object AiFixer {
         val text = buildString {
             if (where.isNotBlank()) append("Where: ").append(where).append('\n')
             if (issue.isNotBlank()) append("Issue: ").append(issue.take(220)).append('\n')
+            if (r.via.isNotBlank()) append("Via: ").append(r.via).append('\n')
             append(if (r.ok) "Fix: " else "Result: ").append(r.summary.take(420))
             if (r.files.isNotEmpty()) append("\nEdited: ").append(r.files.joinToString())
             if (r.backupName != null) append("\nBackup: ").append(r.backupName)
@@ -240,7 +253,7 @@ object AiFixer {
         }?.substringAfter("[server-host] ")?.take(300).orEmpty()
 
     /**
-     * "AI read" detection: when the scanner finds no server (unusual layout), Groq reads the file tree and
+     * "AI read" detection: when the scanner finds no server (unusual layout), the AI reads the file tree and
      * every package.json and says which folders are servers. Answers are validated against real files.
      */
     suspend fun detectServers(
@@ -249,8 +262,7 @@ object AiFixer {
         secrets: SecretStore,
         root: File
     ): List<com.imayx.host.projects.ServerScanner.Found> = withContext(Dispatchers.IO) {
-        val key = secrets.get(SecretStore.KEY_GROQ_API_KEY)
-        if (key.isNullOrBlank() || !root.isDirectory) return@withContext emptyList()
+        if (!isConfigured(secrets) || !root.isDirectory) return@withContext emptyList()
         try {
             val tree = fileTree(root)
             val pk = StringBuilder()
@@ -268,7 +280,7 @@ Each server is one folder with one entry file (plain JavaScript run with `node`,
 Reply STRICT JSON only: {"servers":[{"dir":"relative/folder or empty string for the root","entry":"file relative to dir"}],"note":"short"}
 Never include node_modules, tests, frontends without a server, or build output. Paths must exist in the tree and never contain "..".
 """.trimIndent()
-            val reply = chat(key, settings.aiModel, sys, "File tree:\n$tree\n\npackage.json files:\n$pk")
+            val reply = chat(settings, secrets, sys, "File tree:\n$tree\n\npackage.json files:\n$pk").reply
             val st = reply.indexOf('{'); val en = reply.lastIndexOf('}')
             val arr = JSONObject(if (st >= 0 && en > st) reply.substring(st, en + 1) else reply).optJSONArray("servers") ?: JSONArray()
             val out = ArrayList<com.imayx.host.projects.ServerScanner.Found>()
@@ -335,58 +347,157 @@ Runtime log tail (the error):
 $logs
 """.trimIndent()
 
-    // ------------------------------------------------------------------ groq
+    // ------------------------------------------------------------------ providers
 
     private data class ParsedReply(val analysis: String, val edits: List<Edit>, val notes: String)
     private data class Edit(val path: String, val content: String)
 
-    private fun chat(apiKey: String, model: String, system: String, user: String): String {
-        var last: Exception? = null
-        // The chosen model first; on rate limit / server errors, fall back to the
-        // other live public Groq models (Llama ids are enterprise-only now -> 404).
-        for ((i, m) in listOf(model, "openai/gpt-oss-120b", "openai/gpt-oss-20b").distinct().withIndex()) {
-            try {
-                return chatOnce(apiKey, m, system, user)
-            } catch (e: Exception) {
-                last = e
-                val msg = e.message.orEmpty()
-                val retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5") || msg.contains("timeout", true)
-                if (!retryable) break
-                try { Thread.sleep(if (i == 0) 3000L else 1000L) } catch (_: InterruptedException) { break }
-            }
-        }
-        throw last ?: IllegalStateException("Groq request failed")
+    /** One (provider, model, key) attempt, in failover order. */
+    private data class Candidate(val provider: AiProvider, val model: String, val key: String)
+
+    private data class ChatOutcome(val reply: String, val provider: AiProvider, val model: String)
+
+    data class TestResult(
+        val ok: Boolean,
+        val provider: AiProvider,
+        /** The model that answered (and was auto-selected); null when every model failed. */
+        val model: String?,
+        val latencyMs: Long,
+        val message: String
+    )
+
+    /** Failover order: the active provider first, then the rest in enum order (Groq → Google → OpenRouter). */
+    fun failoverOrder(settings: AppSettings): List<AiProvider> {
+        val active = AiProvider.byId(settings.aiActiveProvider)
+        return listOf(active) + AiProvider.entries.filter { it != active }
     }
 
-    private fun chatOnce(apiKey: String, model: String, system: String, user: String): String {
+    /**
+     * Attempts in order: for each provider in failover order (skipping ones with
+     * no saved key), the user's selected model first, then the provider's other
+     * default models.
+     */
+    private fun candidates(settings: AppSettings, secrets: SecretStore): List<Candidate> {
+        val out = ArrayList<Candidate>()
+        for (p in failoverOrder(settings)) {
+            val key = secrets.get(p.secretKeyName)?.takeIf { it.isNotBlank() } ?: continue
+            val models = (listOf(settings.aiModelFor(p.id, p.defaultModels.first())) + p.defaultModels).distinct()
+            for (m in models) out.add(Candidate(p, m, key))
+        }
+        return out
+    }
+
+    /**
+     * One chat call with automatic failover across providers and models. The first
+     * success wins and says which provider+model produced it. A 401/403 marks the
+     * whole provider dead for this call (bad key — its other models would fail the
+     * same way). When every candidate fails, the thrown error lists each attempt
+     * briefly so the user can see why nothing answered.
+     */
+    private fun chat(settings: AppSettings, secrets: SecretStore, system: String, user: String): ChatOutcome {
+        val cands = candidates(settings, secrets)
+        if (cands.isEmpty()) throw IllegalStateException("No AI API key configured. Add one in Settings → AI.")
+        val deadProviders = HashSet<AiProvider>()
+        val attempts = ArrayList<String>()
+        var last: Exception? = null
+        for (cand in cands) {
+            if (cand.provider in deadProviders) continue
+            try {
+                val reply = chatOnce(
+                    cand.provider, cand.key, cand.model, system, user,
+                    FIX_MAX_TOKENS, jsonMode = cand.provider == AiProvider.GROQ
+                )
+                LogBus.i(LogCategory.NODE, "AI reply via ${cand.provider.label} / ${cand.model}")
+                return ChatOutcome(reply, cand.provider, cand.model)
+            } catch (e: Exception) {
+                last = e
+                val msg = e.message ?: e.javaClass.simpleName
+                attempts.add("${cand.provider.label}/${cand.model}: ${msg.take(140)}")
+                if (msg.contains("HTTP 401") || msg.contains("HTTP 403")) deadProviders.add(cand.provider)
+                LogBus.w(LogCategory.NODE, "AI attempt failed (${cand.provider.label}/${cand.model}): ${msg.take(200)}")
+                if (msg.contains("HTTP 429") || msg.contains("HTTP 5")) {
+                    try { Thread.sleep(1200) } catch (_: InterruptedException) { break }
+                }
+            }
+        }
+        throw IllegalStateException("All AI providers failed. " + attempts.joinToString(" · ").take(700), last)
+    }
+
+    /**
+     * Settings "Test" for one provider: a minimal ping against its selected model,
+     * then its other default models. The first model that answers is SAVED as that
+     * provider's selected model (auto-select) and reported with its latency.
+     */
+    suspend fun testProvider(settings: AppSettings, secrets: SecretStore, provider: AiProvider): TestResult =
+        withContext(Dispatchers.IO) {
+            val key = secrets.get(provider.secretKeyName)
+            if (key.isNullOrBlank()) {
+                return@withContext TestResult(false, provider, null, 0, "No ${provider.label} API key saved.")
+            }
+            val models = (listOf(settings.aiModelFor(provider.id, provider.defaultModels.first())) + provider.defaultModels).distinct()
+            var lastMsg = "unknown error"
+            for (m in models) {
+                val t0 = System.currentTimeMillis()
+                try {
+                    chatOnce(provider, key, m, TEST_SYSTEM, "ping", TEST_MAX_TOKENS, jsonMode = provider == AiProvider.GROQ)
+                    val dt = System.currentTimeMillis() - t0
+                    settings.setAiModelFor(provider.id, m)
+                    LogBus.i(LogCategory.NODE, "AI test OK: ${provider.label} / $m (${dt}ms) — auto-selected")
+                    return@withContext TestResult(
+                        true, provider, m, dt,
+                        "${provider.label} OK — $m answered in ${dt}ms. Working model auto-selected."
+                    )
+                } catch (e: Exception) {
+                    lastMsg = (e.message ?: e.javaClass.simpleName).take(220)
+                    LogBus.w(LogCategory.NODE, "AI test failed (${provider.label}/$m): ${lastMsg.take(200)}")
+                }
+            }
+            TestResult(false, provider, null, 0, "${provider.label}: every model failed. Last error: $lastMsg")
+        }
+
+    /**
+     * A single OpenAI-style chat/completions call. [jsonMode] (response_format
+     * json_object) is only requested from Groq — it was part of the original Groq
+     * integration; the other providers get the same strict-JSON system prompt
+     * without it, and [parseReply] tolerates stray text around the JSON.
+     */
+    private fun chatOnce(
+        provider: AiProvider, apiKey: String, model: String,
+        system: String, user: String, maxTokens: Int, jsonMode: Boolean
+    ): String {
         val body = JSONObject()
             .put("model", model)
             .put("temperature", 0.2)
-            .put("max_tokens", 8000)
-            .put("response_format", JSONObject().put("type", "json_object"))
-            .put(
-                "messages", JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", system))
-                    .put(JSONObject().put("role", "user").put("content", user))
-            )
-        val url = URL(GROQ_URL)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+            .put("max_tokens", maxTokens)
+        if (jsonMode) body.put("response_format", JSONObject().put("type", "json_object"))
+        body.put(
+            "messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", user))
+        )
+        val conn = (URL(provider.chatUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 30_000
             readTimeout = 120_000
             doOutput = true
             setRequestProperty("Authorization", "Bearer $apiKey")
             setRequestProperty("Content-Type", "application/json")
+            if (provider == AiProvider.OPENROUTER) {
+                // Optional app attribution headers OpenRouter asks for.
+                setRequestProperty("HTTP-Referer", "https://imayx.in")
+                setRequestProperty("X-Title", "IMAYX Host")
+            }
         }
         try {
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.readText() ?: ""
-            if (code !in 200..299) throw IllegalStateException("Groq HTTP $code: ${text.take(300)}")
+            if (code !in 200..299) throw IllegalStateException("${provider.label} HTTP $code: ${text.take(300)}")
             val content = JSONObject(text)
                 .getJSONArray("choices").getJSONObject(0)
-                .getJSONObject("message").getString("content")
+                .getJSONObject("message").optString("content", "")
+            if (content.isBlank()) throw IllegalStateException("${provider.label} returned an empty reply")
             return content
         } finally {
             conn.disconnect()

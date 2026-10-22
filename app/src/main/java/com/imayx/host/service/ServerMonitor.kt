@@ -66,7 +66,7 @@ object ServerMonitor {
                             lastInfo[name] = now
                             AiNotifier.post(
                                 ctx, "Server error · $name",
-                                "Issue: $issue\nAI auto-fix is off or has no Groq key (Settings → AI auto-fix)."
+                                "Issue: $issue\nAI auto-fix is off or has no AI key (Settings → AI)."
                             )
                         }
                         continue

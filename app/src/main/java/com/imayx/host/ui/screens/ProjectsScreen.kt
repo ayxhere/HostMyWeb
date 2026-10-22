@@ -456,7 +456,7 @@ private fun ProjectCard(
                     DropdownMenuItem(text = { Text("Export ZIP", color = c.text) }, onClick = { menu = false; onExport() })
                     if (cfg.runtime == RuntimeType.SERVER) {
                         DropdownMenuItem(
-                            text = { Text("✦ AI Fix (Groq)", color = c.text) },
+                            text = { Text("✦ AI Fix", color = c.text) },
                             onClick = { menu = false; onAiFix() }
                         )
                         DropdownMenuItem(
