@@ -309,6 +309,7 @@ fun ProjectsScreen(
                 gate.request(lock) { envFor = cfg.name }
             },
             onCreateAdmin = { u, p -> vm.createBackendAdmin(cfg.name, u, p) },
+            onResetAdmin = { vm.resetBackendAdmin() },
             onRunScript = { cmd -> vm.runNodeCommandLine(cfg.name, cmd) },
             onDetectAi = {
                 configFor = null
@@ -574,7 +575,7 @@ private fun CreateAdminDialog(onDismiss: () -> Unit, onConfirm: (String, String)
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Runs: node scripts/create-admin.js — the password is passed to the process only and is never stored.",
+                    "Creates the admin account on this app's built-in AyX backend. The password is sent only to that backend (over loopback) and is never stored.",
                     color = c.soft,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -595,6 +596,41 @@ private fun CreateAdminDialog(onDismiss: () -> Unit, onConfirm: (String, String)
             }
         },
         confirmButton = { IxButton("Create", onClick = { onConfirm(username, password) }, enabled = valid) },
+        dismissButton = { IxButton("Cancel", onDismiss, kind = BtnKind.Ghost) }
+    )
+}
+
+/**
+ * Confirmation for resetting the BUILT-IN AyX backend's admin. States exactly
+ * what is deleted (the admin account + its sessions, login lockouts and 2FA
+ * challenges) and what is NOT (group data) — the reset exists so a forgotten
+ * admin password is recoverable via "Create admin account…" afterwards.
+ */
+@Composable
+private fun ResetBackendAdminDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val c = Ix.c
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.card,
+        titleContentColor = c.text,
+        textContentColor = c.soft,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+        title = { Text("Reset AyX backend admin") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "This deletes the admin account of this app's built-in AyX backend — including its sign-in sessions, login lockouts and 2FA challenges — so you can create a new admin with \"Create admin account…\".",
+                    color = c.soft,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    "Group data, announcements, statuses, installations and media are NOT touched.",
+                    color = c.soft,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = { IxButton("Reset admin", onClick = onConfirm) },
         dismissButton = { IxButton("Cancel", onDismiss, kind = BtnKind.Ghost) }
     )
 }
@@ -870,6 +906,7 @@ private fun ConfigDialog(
     onSave: (ProjectConfig) -> Unit,
     onEnv: () -> Unit,
     onCreateAdmin: (String, String) -> Unit,
+    onResetAdmin: () -> Unit,
     onRunScript: (String) -> Unit,
     onDetectAi: () -> Unit = {}
 ) {
@@ -886,6 +923,7 @@ private fun ConfigDialog(
     var entry by remember { mutableStateOf(cfg.entryFile) }
     var args by remember { mutableStateOf(cfg.nodeArgs) }
     var showAdmin by remember { mutableStateOf(false) }
+    var showResetAdmin by remember { mutableStateOf(false) }
     var oneOff by remember { mutableStateOf("") }
 
     val portNum = port.toIntOrNull()
@@ -968,6 +1006,7 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                     IxButton("Create admin account…", onClick = { showAdmin = true }, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
+                    IxButton("Reset AyX backend admin…", onClick = { showResetAdmin = true }, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     IxTextField(
                         value = oneOff,
                         onValueChange = { oneOff = it },
@@ -1021,6 +1060,16 @@ private fun ConfigDialog(
             onConfirm = { u, p ->
                 showAdmin = false
                 onCreateAdmin(u, p)
+            }
+        )
+    }
+
+    if (showResetAdmin) {
+        ResetBackendAdminDialog(
+            onDismiss = { showResetAdmin = false },
+            onConfirm = {
+                showResetAdmin = false
+                onResetAdmin()
             }
         )
     }

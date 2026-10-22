@@ -130,6 +130,57 @@ object AyxBackendRuntime {
         }, "ayx-admin-bootstrap").start()
     }
 
+    /**
+     * Deletes the built-in backend's admin account(s) via the token-guarded
+     * `POST /v1/local/admin/reset` endpoint, so the one-time bootstrap can
+     * run again — the forgotten-password recovery path (without it, a lost
+     * admin password would lock the owner out of his own backend forever,
+     * because bootstrap refuses with 409 once any admin exists). The
+     * endpoint clears ONLY the admin identity tables (users, sessions,
+     * lockouts, 2FA challenges) on the server side; group data is untouched.
+     * Like [bootstrapAdmin] this MUST go over HTTP: a second node process
+     * in this OS process would trip Node's one-start assertion. [onDone] is
+     * invoked once with the outcome; the local token is sent only as a
+     * header and is never logged.
+     */
+    fun resetAdmin(
+        ctx: Context,
+        onDone: (ok: Boolean, message: String) -> Unit
+    ) {
+        Thread({
+            try {
+                // Same reasoning as bootstrapAdmin: don't gate on
+                // isServerRunning() — just try the loopback HTTP call.
+                val url = java.net.URL("http://127.0.0.1:$PORT/v1/local/admin/reset")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000
+                    readTimeout = 15000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("x-local-token", localOpToken(ctx))
+                }
+                conn.outputStream.use { it.write("{}".toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                val resp = try {
+                    conn.inputStream.bufferedReader().readText()
+                } catch (_: Exception) {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                }
+                when (code) {
+                    200 -> onDone(true, "The backend's admin account, sessions and lockouts were deleted.")
+                    403 -> onDone(false, "Not authorized.")
+                    else -> onDone(false, "Server returned $code: ${resp.take(200)}")
+                }
+            } catch (e: java.net.ConnectException) {
+                val tail = nodeLogTail(ctx).takeLast(800)
+                onDone(false, "Backend is not running — start hosting first, then reset the admin.\n\nNode log:\n$tail")
+            } catch (e: Exception) {
+                onDone(false, "Could not reach the backend: ${e.message}")
+            }
+        }, "ayx-admin-reset").start()
+    }
+
     /** True while the API server thread is up. */
     fun isServerRunning(): Boolean = serverAlive.get()
 

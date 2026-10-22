@@ -204,6 +204,33 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Resets the BUILT-IN AyX backend's admin (forgotten-password recovery):
+     * deletes the admin account, its sessions, lockouts and 2FA challenges
+     * server-side so [createBackendAdmin] can run again. Group data is not
+     * touched. Like create, this targets the app-wide built-in backend,
+     * not the project whose settings dialog opened it.
+     */
+    fun resetBackendAdmin() {
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(busy = "Resetting AyX backend admin…")
+            val (ok, msg) = withContext(Dispatchers.IO) {
+                val done = CompletableDeferred<Pair<Boolean, String>>()
+                try {
+                    AyxBackendRuntime.resetAdmin(
+                        getApplication()
+                    ) { ok, message -> done.complete(ok to message) }
+                } catch (e: Exception) {
+                    done.complete(false to (e.message ?: "Could not reset admin"))
+                }
+                done.await()
+            }
+            _ui.value = _ui.value.copy(busy = null)
+            _scriptResult.value = if (ok) "AyX backend admin reset.\n\n$msg\n\nNow create a new admin with \"Create admin account…\"."
+            else "Could not reset the admin account.\n\n$msg"
+        }
+    }
+
     private fun isHosted(name: String): Boolean {
         val h = g.host.state.value
         return (h.project == name || name in h.extras) && h.state != ProcessState.STOPPED
