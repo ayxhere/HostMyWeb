@@ -188,12 +188,20 @@ class AppSettings(context: Context) {
     /**
      * Selected model for one AI provider. Groq keeps the legacy "ai_model" key
      * (with its self-heal remap in [aiModel]); the other providers use
-     * "ai_model_<id>" and fall back to [defaultModel] when unset.
+     * "ai_model_<id>" and fall back to [defaultModel] when unset. Stored ids a
+     * provider has since retired are remapped to a live id here too (Google
+     * shut down the gemini-2.0 flash ids — same pattern as the Groq remap).
      */
     fun aiModelFor(providerId: String, defaultModel: String): String {
         if (providerId == "groq") return aiModel
         val stored = prefs.getString("ai_model_$providerId", null)?.trim().orEmpty()
-        return stored.ifBlank { defaultModel }
+        if (stored.isBlank()) return defaultModel
+        if (providerId == "google") {
+            when (stored) {
+                "gemini-2.0-flash", "gemini-2.0-flash-lite" -> return "gemini-3.8-flash"
+            }
+        }
+        return stored
     }
 
     fun setAiModelFor(providerId: String, model: String) {

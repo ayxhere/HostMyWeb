@@ -38,8 +38,9 @@ import java.net.URL
 object AiFixer {
     private const val MAX_EDITS = 10
     private const val FIX_MAX_TOKENS = 8000
-    private const val TEST_MAX_TOKENS = 16
-    private const val TEST_SYSTEM = "You are a connectivity test inside an Android app. Reply with strict JSON only: {\"ok\":true}"
+    private const val TEST_MAX_TOKENS = 256
+    private const val TEST_SYSTEM = "You are a connectivity test inside an Android app."
+    private const val TEST_USER = "Reply with exactly: OK"
     private const val MAX_FILE_BYTES = 200 * 1024
     private const val MAX_LOG_CHARS = 6000
     /** File-tree budget for AI prompts. Was 80 — a real bundle (site + backend +
@@ -427,6 +428,12 @@ $logs
      * Settings "Test" for one provider: a minimal ping against its selected model,
      * then its other default models. The first model that answers is SAVED as that
      * provider's selected model (auto-select) and reported with its latency.
+     *
+     * The ping is a PLAIN chat completion — never JSON mode, for any provider.
+     * JSON mode broke the Groq test: with a tiny token budget the gpt-oss
+     * reasoning models spent it all on reasoning, produced an EMPTY generation,
+     * and Groq's server-side JSON validation rejected it (HTTP 400
+     * json_validate_failed). Any parseable reply counts as success here.
      */
     suspend fun testProvider(settings: AppSettings, secrets: SecretStore, provider: AiProvider): TestResult =
         withContext(Dispatchers.IO) {
@@ -439,7 +446,7 @@ $logs
             for (m in models) {
                 val t0 = System.currentTimeMillis()
                 try {
-                    chatOnce(provider, key, m, TEST_SYSTEM, "ping", TEST_MAX_TOKENS, jsonMode = provider == AiProvider.GROQ)
+                    chatOnce(provider, key, m, TEST_SYSTEM, TEST_USER, TEST_MAX_TOKENS, jsonMode = false)
                     val dt = System.currentTimeMillis() - t0
                     settings.setAiModelFor(provider.id, m)
                     LogBus.i(LogCategory.NODE, "AI test OK: ${provider.label} / $m (${dt}ms) — auto-selected")
@@ -460,6 +467,7 @@ $logs
      * json_object) is only requested from Groq — it was part of the original Groq
      * integration; the other providers get the same strict-JSON system prompt
      * without it, and [parseReply] tolerates stray text around the JSON.
+     * The Settings provider Test always passes jsonMode = false (see [testProvider]).
      */
     private fun chatOnce(
         provider: AiProvider, apiKey: String, model: String,

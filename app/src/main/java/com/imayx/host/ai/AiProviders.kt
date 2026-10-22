@@ -33,7 +33,7 @@ enum class AiProvider(
         "google", "Google Gemini",
         "https://generativelanguage.googleapis.com/v1beta/openai",
         SecretStore.KEY_GOOGLE_API_KEY,
-        listOf("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-lite"),
+        listOf("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"),
         "aistudio.google.com"
     ),
     OPENROUTER(
