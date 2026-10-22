@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           # Binaries are stored as base64 text parts (GitHub file API is text-only).
           cat app/src/main/assets/ayx-backend.zip.b64.* | base64 -d > app/src/main/assets/ayx-backend.zip
-          echo "ed9ba5cf20ad1028d7a7e4308c4d8e45051ce2df9d4a836f42aa49daf2d88344  app/src/main/assets/ayx-backend.zip" | sha256sum -c -
+          echo "684a7586a12f723bb9ea6e2233c1fa517a9ea7dac2ee8e303e34090d981e5dc8  app/src/main/assets/ayx-backend.zip" | sha256sum -c -
           cat app/src/main/assets/wish-service.zip.b64.* | base64 -d > app/src/main/assets/wish-service.zip
           cat gradle/wrapper/gradle-wrapper.jar.b64.* | base64 -d > gradle/wrapper/gradle-wrapper.jar
           ls -l app/src/main/assets/ayx-backend.zip app/src/main/assets/wish-service.zip gradle/wrapper/gradle-wrapper.jar
