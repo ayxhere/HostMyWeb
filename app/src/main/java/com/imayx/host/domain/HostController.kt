@@ -108,9 +108,10 @@ class HostController(
         }
     }
 
-    /** The port a project effectively listens on: the primary one always uses the tunnel port. */
+    /** The port a project effectively listens on: always its OWN configured port
+     *  (for a SERVER project, its main server's port — the two are kept in sync). */
     fun effectivePort(cfg: ProjectConfig, isPrimary: Boolean): Int =
-        if (isPrimary) settings.primaryPort else cfg.port
+        cfg.servers.firstOrNull { it.primary }?.port ?: cfg.port
 
     /**
      * Starts several projects at once. The first one that comes up becomes the primary project
@@ -219,13 +220,14 @@ class HostController(
             val env = ServerRuntime.buildEnv(appContext, cfg.name, root, secretEnv)
             return listOf(ServerRuntime.ServerSpec(cfg.name, root, cfg.entryFile, cfg.port, env))
         }
-        val isPrimaryProject = activeConfig?.name == cfg.name
         val multi = cfg.servers.count { it.enabled } > 1
         return cfg.servers.filter { it.enabled }.map { sv ->
             val dir = if (sv.dir.isEmpty()) root else java.io.File(root, sv.dir)
             val env = ServerRuntime.buildEnv(appContext, cfg.name, dir, secretEnv) + mapOf("SERVER_NAME" to sv.name)
-            // The primary server of the primary project always binds the tunnel port.
-            val port = if (isPrimaryProject && sv.primary) settings.primaryPort else sv.port
+            // Every server binds its OWN saved port — including the main server of
+            // the hosted project. The tunnel targets the main server's port
+            // (= the project port, kept in sync), never a global override.
+            val port = sv.port
             ServerRuntime.ServerSpec(
                 name = if (multi) "${cfg.name}/${sv.name}" else cfg.name,
                 dir = dir, entry = sv.entry, port = port, env = env,
@@ -396,10 +398,11 @@ class HostController(
         tunnelRestarts.clear()
         settings.hostingWanted = true
         settings.activeProject = cfg.name
-        // The primary project ALWAYS binds the primary (tunnel) port — this is what
-        // the Cloudflare tunnel points at, so the public site can never 502 just
-        // because a project was imported with a different port.
-        val effective = cfg.copy(port = settings.primaryPort)
+        // The project binds its OWN configured port (for a SERVER project: its main
+        // server's port — ProjectManager keeps the two in sync) and the Cloudflare
+        // tunnel targets exactly that port. There is NO global primary-port
+        // override: the port a user sets in Project settings is the port that runs.
+        val effective = cfg
         activeConfig = effective
         _state.value = HostState(ProcessState.STARTING, cfg.name, cfg.runtime, effective.port)
         LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${cfg.runtime} port=${effective.port}")

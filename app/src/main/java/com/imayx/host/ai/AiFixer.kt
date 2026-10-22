@@ -35,7 +35,11 @@ object AiFixer {
     private const val MAX_EDITS = 10
     private const val MAX_FILE_BYTES = 200 * 1024
     private const val MAX_LOG_CHARS = 6000
-    private const val MAX_TREE_FILES = 80
+    /** File-tree budget for AI prompts. Was 80 — a real bundle (site + backend +
+     *  otp ≈ 103 entries) silently lost its tail (whole server folders) at 80,
+     *  so the AI "read" a project that was missing servers. 1000 entries ≈ 30KB
+     *  of prompt — affordable, and truncation is now MARKED in the tree itself. */
+    private const val MAX_TREE_FILES = 1000
     /** Minimum gap between two automatic fixes of the same project. */
     private const val AUTO_COOLDOWN_MS = 10 * 60 * 1000L
 
@@ -429,6 +433,7 @@ $logs
             }
         }
         dir.listFiles()?.sortedBy { it.name }?.forEach { walk(it, 0) }
+        if (count >= MAX_TREE_FILES) out.append("... (file tree truncated at $MAX_TREE_FILES entries)\n")
         out.append("node_modules present: ${File(dir, "node_modules").isDirectory}\n")
         return out.toString()
     }

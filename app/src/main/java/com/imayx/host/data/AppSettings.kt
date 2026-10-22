@@ -50,10 +50,10 @@ class AppSettings(context: Context) {
         }
 
     /**
-     * The port the primary (active) project always binds to. The Cloudflare
-     * tunnel points here, so it must stay stable no matter how many projects
-     * are imported or which ports they were given. Secondary projects in a
-     * multi-start keep their own ports (which always skip this one).
+     * The DEFAULT port given to a bundle's main server when servers are detected
+     * or a ZIP is imported (and the port reserved for it when handing out fresh
+     * ports). It is NOT an override: every project binds its OWN saved port, and
+     * the Cloudflare tunnel targets the hosted project's port.
      */
     var primaryPort: Int
         get() = prefs.getInt("primary_port", 3000)

@@ -112,7 +112,7 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel(), cf: CloudflareViewModel 
             IxTextField(
                 primaryPortText, { primaryPortText = it.filter(Char::isDigit).take(5) }, "Primary port",
                 keyboardType = KeyboardType.Number,
-                supportingText = "1024–65535. The ACTIVE project always serves on this port — point your Cloudflare tunnel and public-hostname routes here. Restart hosting to apply."
+                supportingText = "1024–65535. Default port given to a bundle's MAIN server on import/detect. Every project then serves on its OWN saved port — point your Cloudflare tunnel routes at each project's own port."
             )
             IxButton("Save primary port", { primaryPortText.toIntOrNull()?.let { vm.setPrimaryPort(it); snack("Primary port saved — restart hosting to apply") } }, kind = BtnKind.Secondary,
                 enabled = (primaryPortText.toIntOrNull() ?: 0) in 1024..65535)

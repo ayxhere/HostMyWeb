@@ -193,8 +193,9 @@ fun ProjectsScreen(
                         info.config.name in host.extras && host.state == ProcessState.RUNNING -> ProcessState.RUNNING
                         else -> ProcessState.STOPPED
                     }
-                    // The primary project always serves on the primary (tunnel) port while running.
-                    val effPort = if (isPrimary && hostedState != ProcessState.STOPPED) vm.primaryPort() else info.config.port
+                    // A hosted project always serves on its OWN saved port (for a
+                    // SERVER project: its main server's port — kept in sync).
+                    val effPort = info.config.port
                     ProjectCard(
                         info = info,
                         isActive = vm.activeProject == info.config.name,
@@ -481,7 +482,7 @@ private fun ProjectCard(
         if (cfg.runtime == RuntimeType.SERVER && cfg.servers.isNotEmpty()) {
             // One row per detected server: "Server 1 · api · :3201 → api.<domain>"
             cfg.servers.forEachIndexed { i, sv ->
-                val port = if (isPrimary && sv.primary && hostedState != ProcessState.STOPPED) effPort else sv.port
+                val port = sv.port
                 val host = if (sv.primary || sv.subdomain.isBlank()) "main (tunnel :$effPort)"
                 else sv.subdomain + "." + cfg.domain.ifBlank { "<domain>" }
                 val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
@@ -843,11 +844,12 @@ private fun ConfigDialog(
     val domainClean = cleanDomain(domain)
     val domainErr = if (domainClean.isNotEmpty() && !isValidHostname(domainClean)) "Enter a valid hostname, e.g. example.com" else null
     val rootErr = if (rootDir.contains("..") || rootDir.startsWith("/")) "Must be a relative folder inside the project" else null
-    // Blank entry is an error only for NODE (a hand-run script must be named). For
-    // SERVER projects blank means "nothing detected yet" — Save re-detects from the
-    // files and stores the real path or leaves it EMPTY, never a "server.js" guess.
+    // Blank entry is NEVER an error: on Save the real entry is auto-detected from
+    // the project files (SERVER: full server list; NODE: the entry file) and the
+    // detected path is stored — or the entry stays blank, never a "server.js" guess.
+    // Only an unsafe path (traversal / absolute) is an error.
     val entryErr = if ((runtime == RuntimeType.NODE || runtime == RuntimeType.SERVER) &&
-        (entry.contains("..") || entry.startsWith("/") || (runtime == RuntimeType.NODE && entry.isBlank()))
+        (entry.contains("..") || entry.startsWith("/"))
     ) "Relative file inside the project" else null
     val active = servers.filter { it.enabled }
     val srvErr = when {
@@ -886,7 +888,7 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                if (!(runtime == RuntimeType.SERVER && servers.isNotEmpty())) IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "Used when this project runs alongside others. The ACTIVE project always uses the primary port (Settings).", keyboardType = KeyboardType.Number)
+                if (!(runtime == RuntimeType.SERVER && servers.isNotEmpty())) IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "The port THIS project runs on. When it is hosted, the Cloudflare tunnel targets this port.", keyboardType = KeyboardType.Number)
                 if (runtime == RuntimeType.STATIC) {
                     IxTextField(rootDir, { rootDir = it.trim() }, "Root directory (optional)", placeholder = "e.g. dist", isError = rootErr != null, supportingText = rootErr ?: "Sub-folder that is served. Empty = project root.")
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
@@ -935,7 +937,7 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 } else {
-                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr)
+                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Leave blank: on Save, the real entry is auto-detected from the project files (e.g. src/server.js).")
                     IxTextField(args, { args = it }, "Arguments (optional)")
                     IxButton("Environment secrets…", onClick = onEnv, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     Text(

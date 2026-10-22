@@ -30,7 +30,10 @@ class ProjectManager(
 
     fun info(cfg: ProjectConfig): ProjectInfo {
         val dir = store.projectDir(cfg.name)
-        return ProjectInfo(cfg, PathUtil.folderSize(dir), PathUtil.fileCount(dir), PathUtil.lastModified(dir))
+        // ONE traversal for size + count + mtime (was three full walks — on a
+        // 7k-file node_modules tree that tripled the cost of every list refresh).
+        val s = PathUtil.folderStats(dir)
+        return ProjectInfo(cfg, s.sizeBytes, s.fileCount, s.lastModified)
     }
 
     fun listInfo(): List<ProjectInfo> = list().map { info(it) }
@@ -319,11 +322,15 @@ class ProjectManager(
                     )
                 }
                 LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, entry=$entry)")
+                // ONE port for both the def and the project: the server binds the
+                // def's port and the tunnel targets the project's port — they must
+                // never disagree (was: def=primaryPort, project=nextFreePort()).
+                val p = nextFreePort()
                 val one = com.imayx.host.data.ServerDef(
                     name = PathUtil.sanitizeProjectName(name).lowercase().take(32), dir = "", entry = entry,
-                    port = settings.primaryPort, subdomain = "", enabled = true, primary = true
+                    port = p, subdomain = "", enabled = true, primary = true
                 )
-                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = nextFreePort(), entryFile = entry, servers = listOf(one))
+                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = p, entryFile = entry, servers = listOf(one))
             } else {
                 LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")
                 ProjectConfig(name = name, port = nextFreePort())
@@ -341,11 +348,18 @@ class ProjectManager(
         }
     }
 
-    /** Assigns names, subdomains and free ports to freshly scanned servers. */
-    private fun buildDefs(project: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
+    /** Assigns names, subdomains and free ports to freshly scanned servers.
+     *  [primaryPort] is the port the bundle's main server gets: the global primary
+     *  port for a brand-new import, or the PROJECT'S OWN saved port when filling /
+     *  re-detecting an existing project (its port must never be renumbered). */
+    private fun buildDefs(
+        project: String,
+        found: List<ServerScanner.Found>,
+        primaryPort: Int = settings.primaryPort
+    ): List<com.imayx.host.data.ServerDef> {
         val used = store.list().filter { it.name != project }
             .flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toSet()
-        return ServerScanner.toDefs(found, project, used, settings.primaryPort, maxOf(settings.defaultPort, 3200))
+        return ServerScanner.toDefs(found, project, used, primaryPort, maxOf(settings.defaultPort, 3200))
     }
 
     /**
@@ -354,8 +368,11 @@ class ProjectManager(
      * never renumbers a working setup; new folders get fresh free ports.
      */
     fun previewDefs(name: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
-        val fresh = buildDefs(name, found)
-        val cfg = store.get(name) ?: return fresh
+        val existing = store.get(name)
+        // An existing project keeps its own port for the main server; only a
+        // brand-new import falls back to the global primary port.
+        val fresh = buildDefs(name, found, primaryPort = existing?.port ?: settings.primaryPort)
+        val cfg = existing ?: return fresh
         val merged = fresh.map { f ->
             val old = cfg.servers.firstOrNull { it.dir == f.dir }
             if (old != null) f.copy(
@@ -386,6 +403,9 @@ class ProjectManager(
         val prim = defs.firstOrNull { it.primary } ?: defs.first()
         val out = cfg.copy(
             runtime = RuntimeType.SERVER, servers = defs,
+            // Keep the project-level port in sync with the main server's port:
+            // the server binds def.port, the tunnel targets project.port.
+            port = prim.port,
             entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
         )
         store.save(out)
@@ -407,27 +427,44 @@ class ProjectManager(
     }
 
     /**
-     * A SERVER project saved with an empty server list (e.g. the runtime was switched by
-     * hand): detect the real servers from the project files so the entry shown and run is
-     * the REAL path (e.g. backend/server.js), never the "server.js" placeholder default.
+     * Fills a project's REAL entry from its files on save, so the entry shown and run
+     * is the detected path (e.g. src/server.js), never a "server.js" placeholder:
+     *  - A SERVER project saved with an empty server list gets the full detected
+     *    server list (and its project port synced to the main server's port).
+     *  - A NODE project saved with a blank entry gets the detected entry — a blank
+     *    entry must never dead-end the settings dialog; the file either exists in
+     *    the project (and is used) or the entry stays blank and start reports it.
+     * A user-typed entry is never overwritten.
      */
     fun fillDetectedServers(cfg: ProjectConfig): ProjectConfig {
-        if (cfg.runtime != RuntimeType.SERVER || cfg.servers.isNotEmpty()) return cfg
         val dir = store.projectDir(cfg.name)
         if (!dir.isDirectory) return cfg
-        val found = ServerScanner.scan(dir)
-        if (found.isNotEmpty()) {
-            val defs = buildDefs(cfg.name, found)
-            val prim = defs.firstOrNull { it.primary } ?: defs.first()
-            return cfg.copy(
-                servers = defs,
-                entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
-            )
+        if (cfg.runtime == RuntimeType.SERVER && cfg.servers.isEmpty()) {
+            val found = ServerScanner.scan(dir)
+            if (found.isNotEmpty()) {
+                // The project's OWN saved port becomes the main server's port —
+                // auto-detect must never renumber a port the user already set.
+                val defs = buildDefs(cfg.name, found, primaryPort = cfg.port)
+                val prim = defs.firstOrNull { it.primary } ?: defs.first()
+                return cfg.copy(
+                    servers = defs,
+                    port = prim.port,
+                    entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
+                )
+            }
+            val entry = detectServerEntry(dir)
+            // Nothing detected: clear any stale entry (e.g. an old "server.js" guess) —
+            // the settings field must show EMPTY, never a made-up default.
+            return if (entry != null) cfg.copy(entryFile = entry) else cfg.copy(entryFile = "")
         }
-        val entry = detectServerEntry(dir)
-        // Nothing detected: clear any stale entry (e.g. an old "server.js" guess) —
-        // the settings field must show EMPTY, never a made-up default.
-        return if (entry != null) cfg.copy(entryFile = entry) else cfg.copy(entryFile = "")
+        if (cfg.runtime == RuntimeType.NODE && cfg.entryFile.isBlank()) {
+            val found = ServerScanner.scan(dir)
+            val prim = found.firstOrNull { it.dir.isEmpty() } ?: found.firstOrNull()
+            val entry = prim?.let { if (it.dir.isEmpty()) it.entry else "${it.dir}/${it.entry}" }
+                ?: detectServerEntry(dir)
+            return if (entry != null) cfg.copy(entryFile = entry) else cfg
+        }
+        return cfg
     }
 
     fun exportZip(name: String, out: OutputStream): Int {

@@ -93,6 +93,30 @@ object PathUtil {
         return n
     }
 
+    /** Size + file count + newest mtime of a tree, gathered in ONE traversal. */
+    data class FolderStats(val sizeBytes: Long, val fileCount: Int, val lastModified: Long)
+
+    fun folderStats(dir: File): FolderStats {
+        var total = 0L
+        var n = 0
+        var latest = dir.lastModified()
+        val stack = ArrayDeque<File>()
+        stack.add(dir)
+        while (stack.isNotEmpty()) {
+            val d = stack.removeLast()
+            val children = d.listFiles() ?: continue
+            for (c in children) {
+                val lm = c.lastModified()
+                if (lm > latest) latest = lm
+                if (c.isDirectory) stack.add(c) else {
+                    total += c.length()
+                    n++
+                }
+            }
+        }
+        return FolderStats(total, n, latest)
+    }
+
     fun lastModified(dir: File): Long {
         var latest = dir.lastModified()
         val stack = ArrayDeque<File>()

@@ -122,9 +122,6 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun nodeInstalled(): Boolean = g.nodeInstaller.isInstalled()
 
-    /** The port the primary (active) project always binds to — the tunnel target. */
-    fun primaryPort(): Int = g.settings.primaryPort
-
     /** True when the built-in Node.js (libnode.so) is bundled and SERVER projects can run. */
     fun serverAvailable(): Boolean = com.imayx.host.node.ServerRuntime.isAvailable()
 
@@ -462,11 +459,10 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun startSelected(names: List<String>) {
         if (names.isEmpty()) return
         val picked = _ui.value.items.map { it.config }.filter { it.name in names }
-        // Mirror HostController.doStartMany: the first Cloudflare-enabled project becomes the
-        // primary and always binds the primary (tunnel) port; the rest keep their own ports.
-        // Two projects on the same EFFECTIVE port can never run together — name them.
-        val primary = picked.sortedByDescending { it.cloudflareEnabled }.firstOrNull()
-        val effPorts = picked.associate { it.name to if (it.name == primary?.name) g.settings.primaryPort else it.port }
+        // Every project runs on its OWN saved port (for a SERVER project that is its
+        // main server's port — the two are kept in sync). Two projects on the same
+        // port can never run together — name them.
+        val effPorts = picked.associate { it.name to it.port }
         val clash = effPorts.entries.groupBy({ it.value }, { it.key }).filter { it.value.size > 1 }
         if (clash.isNotEmpty()) {
             val msg = clash.entries.joinToString("; ") { (port, list) ->
@@ -474,7 +470,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
             }
             _messages.tryEmit(
                 "$msg. Change a port in Project Settings first " +
-                    "(the primary project always uses port ${g.settings.primaryPort})."
+                    "(every project runs on its own saved port)."
             )
             return
         }
