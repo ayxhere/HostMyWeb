@@ -157,11 +157,23 @@ class AppSettings(context: Context) {
             bump()
         }
 
-    /** Groq model used by the AI auto-fixer. */
+    /** Groq model used by the AI auto-fixer. Stored ids that Groq has retired
+     *  (bare "gpt-oss-*", enterprise-only Llama ids) are remapped to live public
+     *  ids here so existing installs self-heal without re-typing the model. */
     var aiModel: String
-        get() = prefs.getString("ai_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile"
+        get() {
+            val stored = prefs.getString("ai_model", null)?.trim().orEmpty()
+            return when (stored) {
+                "" -> "openai/gpt-oss-120b"
+                "gpt-oss-20b" -> "openai/gpt-oss-20b"
+                "gpt-oss-120b" -> "openai/gpt-oss-120b"
+                "llama-3.3-70b-versatile" -> "openai/gpt-oss-120b"
+                "llama-3.1-8b-instant" -> "openai/gpt-oss-20b"
+                else -> stored
+            }
+        }
         set(v) {
-            prefs.edit().putString("ai_model", v.trim().ifBlank { "llama-3.3-70b-versatile" }).apply()
+            prefs.edit().putString("ai_model", v.trim().ifBlank { "openai/gpt-oss-120b" }).apply()
             bump()
         }
 

@@ -4,6 +4,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Permanent signing keystore ships in the repo as base64 text
+// (imayx-host.keystore.b64 — the GitHub file API is text-only, same pattern
+// as the bundled .zip assets). Materialize the real .keystore at
+// configuration time so ANY build (CI or local) can sign with it.
+run {
+    val ksFile = rootProject.file("imayx-host.keystore")
+    val b64File = rootProject.file("imayx-host.keystore.b64")
+    if (!ksFile.exists() && b64File.exists()) {
+        ksFile.writeBytes(java.util.Base64.getDecoder().decode(b64File.readText().trim()))
+    }
+}
+
 android {
     namespace = "com.imayx.host"
     compileSdk = 35
@@ -18,8 +30,8 @@ android {
         applicationId = "com.imayx.host"
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
-        versionName = "3.3"
+        versionCode = 7
+        versionName = "3.4"
 
         ndk {
             // Embedded Node (libnode.so) ships arm64 only.
@@ -34,9 +46,25 @@ android {
         }
     }
 
+    // Permanent signing: every build (CI debug included) is signed with the
+    // repo-root keystore, so a new build always installs OVER the previous one
+    // (no uninstall/reinstall). Password lives in gradle.properties.
+    signingConfigs {
+        create("imayx") {
+            storeFile = rootProject.file("imayx-host.keystore")
+            storePassword = project.findProperty("IMAYX_KEYSTORE_PASSWORD") as String?
+            keyAlias = "imayx-host"
+            keyPassword = project.findProperty("IMAYX_KEYSTORE_PASSWORD") as String?
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("imayx")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("imayx")
         }
     }
 

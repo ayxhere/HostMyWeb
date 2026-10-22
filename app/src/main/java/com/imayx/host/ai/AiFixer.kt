@@ -193,7 +193,7 @@ object AiFixer {
             postResult(ctx, label, where, issue, r)
             r
         } catch (e: Exception) {
-            val msg = "AI fix failed: ${e.message ?: e.javaClass.simpleName}"
+            val msg = e.message ?: e.javaClass.simpleName
             LogBus.e(LogCategory.NODE, "AI fix for $label: $msg")
             val r = FixResult(false, msg, 0, null)
             postResult(ctx, label, "", firstErrorLine(logOverride ?: ""), r)
@@ -342,8 +342,9 @@ $logs
 
     private fun chat(apiKey: String, model: String, system: String, user: String): String {
         var last: Exception? = null
-        // One retry on rate limit / server errors, then a smaller fallback model.
-        for ((i, m) in listOf(model, model, "llama-3.1-8b-instant").withIndex()) {
+        // The chosen model first; on rate limit / server errors, fall back to the
+        // other live public Groq models (Llama ids are enterprise-only now -> 404).
+        for ((i, m) in listOf(model, "openai/gpt-oss-120b", "openai/gpt-oss-20b").distinct().withIndex()) {
             try {
                 return chatOnce(apiKey, m, system, user)
             } catch (e: Exception) {

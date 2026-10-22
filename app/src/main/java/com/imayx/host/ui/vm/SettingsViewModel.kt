@@ -39,7 +39,7 @@ data class SettingsUi(
     val lockEnabled: Boolean = false,
     val biometric: Boolean = false,
     val aiAutoFix: Boolean = false,
-    val aiModel: String = "llama-3.3-70b-versatile",
+    val aiModel: String = "openai/gpt-oss-120b",
     val hasGroqKey: Boolean = false,
     val batteryUnrestricted: Boolean = false,
     val projectsBytes: Long = 0,
