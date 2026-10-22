@@ -233,19 +233,27 @@ private fun CodeArea(vm: EditorViewModel, tab: EditorTab, modifier: Modifier = M
             attr = Color(0xFFFFD479)
         )
     }
-    val codeStyle = TextStyle(
-        fontFamily = FontFamily.Monospace,
-        fontSize = CODE_SIZE,
-        lineHeight = LINE_HEIGHT,
-        color = c.text
-    )
+    // Remembered: this TextStyle was re-allocated on every CodeArea recomposition.
+    val codeStyle = remember(c) {
+        TextStyle(
+            fontFamily = FontFamily.Monospace,
+            fontSize = CODE_SIZE,
+            lineHeight = LINE_HEIGHT,
+            color = c.text
+        )
+    }
     val transformation = remember(tab.lang, palette) { HighlightTransformation(tab.lang, palette) }
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
     val density = LocalDensity.current
     val screenWidth = LocalConfiguration.current.screenWidthDp
-    val lineCount = tab.value.text.count { it == '\n' } + 1
-    val gutter = remember(lineCount) { (1..lineCount).joinToString("\n") }
+    // One remembered pass per text change: count newlines + build the gutter
+    // string together. Previously the newline count re-scanned the whole file
+    // on EVERY recomposition of CodeArea (including ones unrelated to typing).
+    val gutter = remember(tab.value.text) {
+        val lineCount = tab.value.text.count { it == '\n' } + 1
+        (1..lineCount).joinToString("\n")
+    }
 
     // Autosave (optional, configured in Settings).
     val autosave = vm.autosave

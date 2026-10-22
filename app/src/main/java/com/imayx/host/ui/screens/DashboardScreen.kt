@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,17 +70,14 @@ fun DashboardScreen(
     val projects by vm.projects.collectAsStateWithLifecycle()
     val loaded by vm.loaded.collectAsStateWithLifecycle()
     val active by vm.activeProject.collectAsStateWithLifecycle()
-    val now by produceState(System.currentTimeMillis()) {
-        while (true) {
-            value = System.currentTimeMillis()
-            delay(1000)
-        }
-    }
 
     LaunchedEffect(host.state, host.project) { vm.refresh() }
 
     val cfg = vm.config(host.project ?: active)
     val busy = host.state == ProcessState.STARTING || host.state == ProcessState.RUNNING
+    // Fresh options list only when the project list itself changes — building it
+    // inline allocated a new List<Pair> on every recomposition of this screen.
+    val projectOptions = remember(projects) { projects.map { it.name to it.name } }
     val port = if (host.project != null) host.port else (cfg?.port ?: host.port)
     val publicUrl = publicUrlOf(tunnel, cfg, vm.defaultDomain)
 
@@ -165,7 +163,7 @@ fun DashboardScreen(
             IxSelect(
                 label = "Current project",
                 selectedLabel = host.project ?: active,
-                options = projects.map { it.name to it.name },
+                options = projectOptions,
                 onSelect = { vm.setActive(it) },
                 enabled = !busy
             )
@@ -245,9 +243,9 @@ fun DashboardScreen(
                 )
                 Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StatTile(
-                        "Uptime",
-                        if (host.state == ProcessState.RUNNING && host.startedAt > 0) Fmt.duration(now - host.startedAt) else "—",
+                    UptimeStatTile(
+                        running = host.state == ProcessState.RUNNING,
+                        startedAt = host.startedAt,
                         modifier = Modifier.weight(1f)
                     )
                     StatTile(
@@ -272,4 +270,29 @@ fun DashboardScreen(
             }
         }
     }
+}
+
+/**
+ * Uptime tile with its own 1-second ticker. Previously the ticker state was read
+ * at DashboardScreen scope, so every tick recomposed the ENTIRE dashboard (all
+ * cards + meters) once per second. Confining the read to this leaf means only
+ * this one tile recomposes per tick; the rest of the dashboard now recomposes
+ * only when host/tunnel/resource state actually changes. The ticker runs only
+ * while a host is running (nothing to count otherwise) and only while composed.
+ */
+@Composable
+private fun UptimeStatTile(running: Boolean, startedAt: Long, modifier: Modifier = Modifier) {
+    val now by produceState(System.currentTimeMillis(), running, startedAt) {
+        if (running && startedAt > 0) {
+            while (true) {
+                value = System.currentTimeMillis()
+                delay(1000)
+            }
+        }
+    }
+    StatTile(
+        "Uptime",
+        if (running && startedAt > 0) Fmt.duration(now - startedAt) else "—",
+        modifier = modifier
+    )
 }

@@ -5,6 +5,14 @@ import java.util.Date
 import java.util.Locale
 
 object Fmt {
+    // SimpleDateFormat construction parses the pattern and allocates a Calendar —
+    // far too expensive to do per call when list rows format dates/times on every
+    // recomposition (Logs, Files). Formatters are not thread-safe, so cache one
+    // per thread per pattern instead of constructing one per call.
+    private val dateFmt = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US) }
+    private val timeFmt = ThreadLocal.withInitial { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
+    private val stampFmt = ThreadLocal.withInitial { SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US) }
+
     fun bytes(value: Long): String {
         if (value < 0) return "Unavailable"
         if (value < 1024) return "$value B"
@@ -35,14 +43,14 @@ object Fmt {
 
     fun date(ms: Long): String {
         if (ms <= 0) return "-"
-        return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(ms))
+        return dateFmt.get().format(Date(ms))
     }
 
     fun time(ms: Long): String =
-        SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(ms))
+        timeFmt.get().format(Date(ms))
 
     fun fileStamp(ms: Long): String =
-        SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(ms))
+        stampFmt.get().format(Date(ms))
 
     fun percent(value: Float?): String =
         if (value == null) "Unavailable" else String.format(Locale.US, "%.0f%%", value)

@@ -112,10 +112,10 @@ private fun MainShell() {
     CompositionLocalProvider(LocalSnack provides snack, LocalGate provides gate) {
         Scaffold(
             containerColor = c.bg,
-            snackbarHost = { SnackbarHost(snackState, modifier = Modifier.navigationBarsPadding().padding(bottom = 72.dp)) },
-            bottomBar = { BottomNav(screen) { current = it.name } }
+            snackbarHost = { SnackbarHost(snackState, modifier = Modifier.navigationBarsPadding()) },
+            topBar = { HeaderNav(screen) { current = it.name } }
         ) { pad ->
-            Box(modifier = Modifier.fillMaxSize().padding(pad).statusBarsPadding()) {
+            Box(modifier = Modifier.fillMaxSize().padding(pad)) {
                 Crossfade(targetState = screen, label = "screen") { s ->
                     when (s) {
                         Screen.Dashboard -> DashboardScreen(onNavigate = { current = it.name }, onPreview = ::openPreview)
@@ -141,14 +141,14 @@ private fun MainShell() {
 }
 
 @Composable
-private fun BottomNav(selected: Screen, onSelect: (Screen) -> Unit) {
+private fun HeaderNav(selected: Screen, onSelect: (Screen) -> Unit) {
     val c = Ix.c
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(c.card)
             .border(1.dp, c.border)
-            .navigationBarsPadding()
+            .statusBarsPadding()
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)

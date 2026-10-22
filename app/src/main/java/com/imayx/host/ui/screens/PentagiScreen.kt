@@ -84,6 +84,11 @@ fun PentagiScreen(vm: PentagiViewModel = viewModel()) {
 
     val managerConfigured = config.hasManagerToken && config.managerUrl.isNotBlank()
     val providerObj = PentagiLlmProvider.fromId(provider)
+    // Remembered: joinToString over the remote logs ran on EVERY recomposition
+    // of this screen (e.g. each keystroke in the config fields below).
+    val logsText = remember(remoteLogs) {
+        if (remoteLogs.isEmpty()) "" else remoteLogs.joinToString("\n").take(12_000)
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         ScreenHeader("PentAGI", subtitle = "AI security platform — remote Docker deployment")
@@ -267,10 +272,9 @@ fun PentagiScreen(vm: PentagiViewModel = viewModel()) {
                 IxButton("Fetch logs (last 100)", onClick = { vm.fetchLogs(100) },
                     kind = BtnKind.Secondary, loading = busy,
                     enabled = managerConfigured && !busy, modifier = Modifier.fillMaxWidth())
-                if (remoteLogs.isNotEmpty()) {
+                if (logsText.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
-                    val text = remoteLogs.joinToString("\n").take(12_000)
-                    Text(text, color = c.text, fontFamily = FontFamily.Monospace,
+                    Text(logsText, color = c.text, fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall)
                 }
             }
