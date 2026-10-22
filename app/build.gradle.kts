@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,7 +14,7 @@ run {
     val ksFile = rootProject.file("imayx-host.keystore")
     val b64File = rootProject.file("imayx-host.keystore.b64")
     if (!ksFile.exists() && b64File.exists()) {
-        ksFile.writeBytes(java.util.Base64.getDecoder().decode(b64File.readText().trim()))
+        ksFile.writeBytes(Base64.getDecoder().decode(b64File.readText().trim()))
     }
 }
 
@@ -30,8 +32,8 @@ android {
         applicationId = "com.imayx.host"
         minSdk = 24
         targetSdk = 35
-        versionCode = 8
-        versionName = "3.5"
+        versionCode = 9
+        versionName = "3.5.1"
 
         ndk {
             // Embedded Node (libnode.so) ships arm64 only.
