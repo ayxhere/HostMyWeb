@@ -287,7 +287,36 @@ class HostController(
         publishExtras()
     }
 
-    private fun startExtra(cfg: ProjectConfig) {
+    /**
+     * Start-time self-heal: a project that HAS server definitions but is still
+     * configured for the NODE runtime cannot start when there is no usable
+     * executable node binary (the bundled libnode.so is a library, not an
+     * executable) — yet it can run perfectly well on the built-in Server
+     * runtime. Switch it (persisted) instead of failing the start. Projects
+     * without servers, and devices with a working executable node, are
+     * untouched: NODE stays respected there.
+     */
+    private fun healRuntime(cfg: ProjectConfig): ProjectConfig {
+        if (cfg.runtime != RuntimeType.NODE) return cfg
+        if (cfg.servers.isEmpty()) return cfg
+        if (hasUsableNodeBinary()) return cfg
+        val healed = cfg.copy(runtime = RuntimeType.SERVER)
+        store.save(healed)
+        LogBus.i(LogCategory.SYSTEM, "Project '${cfg.name}' has servers — switched NODE → Server runtime (built-in Node)")
+        return healed
+    }
+
+    /** Mirrors NodeRuntime.unavailableReason(): no binary, the bundled .so, or a failed probe = unusable. */
+    private fun hasUsableNodeBinary(): Boolean {
+        val installer = runtimes.nodeInstaller
+        val bin = installer.binary() ?: return false
+        if (bin.name.endsWith(".so")) return false
+        return installer.probe()?.ok == true
+    }
+
+    private fun startExtra(rawCfg: ProjectConfig) {
+        // Self-heal (see healRuntime) before any runtime branching.
+        val cfg = healRuntime(rawCfg)
         // PENTAGI projects are remote-only (Docker on a Linux host) — never a local runtime.
         if (cfg.runtime == RuntimeType.PENTAGI) {
             val msg = "${cfg.name}: PentAGI runs on a remote Linux/Docker host — open the PentAGI tab to manage it."
@@ -398,23 +427,25 @@ class HostController(
         tunnelRestarts.clear()
         settings.hostingWanted = true
         settings.activeProject = cfg.name
+        // Self-heal before any runtime branching (see healRuntime).
+        val healedCfg = healRuntime(cfg)
         // The project binds its OWN configured port (for a SERVER project: its main
         // server's port — ProjectManager keeps the two in sync) and the Cloudflare
         // tunnel targets exactly that port. There is NO global primary-port
         // override: the port a user sets in Project settings is the port that runs.
-        val effective = cfg
+        val effective = healedCfg
         activeConfig = effective
-        _state.value = HostState(ProcessState.STARTING, cfg.name, cfg.runtime, effective.port)
-        LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${cfg.runtime} port=${effective.port}")
+        _state.value = HostState(ProcessState.STARTING, cfg.name, effective.runtime, effective.port)
+        LogBus.i(LogCategory.SYSTEM, "Start Host: project=${cfg.name} runtime=${effective.runtime} port=${effective.port}")
 
         // PENTAGI primary: remote-only — fail with guidance instead of trying a local runtime.
-        if (cfg.runtime == RuntimeType.PENTAGI) {
+        if (effective.runtime == RuntimeType.PENTAGI) {
             failStart(effective, "PentAGI cannot run on this device (it needs a Docker daemon on Linux). Open the PentAGI tab to manage the remote deployment.")
             return
         }
 
         // SERVER primary: runs on the embedded node (:node_server process), no ProjectRuntime.
-        if (cfg.runtime == RuntimeType.SERVER) {
+        if (effective.runtime == RuntimeType.SERVER) {
             if (!ServerRuntime.isAvailable()) {
                 failStart(effective, "Embedded Node.js is not bundled in this build (libnode.so missing) — server projects cannot start.")
                 return
@@ -427,7 +458,7 @@ class HostController(
                 return
             }
             activeRuntime = null
-            _state.value = HostState(ProcessState.RUNNING, cfg.name, cfg.runtime, effective.port, startedAt = System.currentTimeMillis())
+            _state.value = HostState(ProcessState.RUNNING, cfg.name, effective.runtime, effective.port, startedAt = System.currentTimeMillis())
             LogBus.i(LogCategory.SYSTEM, "Server ${cfg.name} running on 127.0.0.1:${effective.port} (shared node process)")
             if (cfg.cloudflareEnabled) {
                 startTunnel(effective)
@@ -437,7 +468,7 @@ class HostController(
             return
         }
 
-        val rt = runtimes.forType(cfg.runtime)
+        val rt = runtimes.forType(effective.runtime)
         val unavailable = rt.unavailableReason()
         if (unavailable != null) {
             failStart(effective, unavailable)
@@ -453,7 +484,7 @@ class HostController(
             return
         }
         activeRuntime = rt
-        _state.value = HostState(ProcessState.RUNNING, cfg.name, cfg.runtime, effective.port, startedAt = System.currentTimeMillis())
+        _state.value = HostState(ProcessState.RUNNING, cfg.name, effective.runtime, effective.port, startedAt = System.currentTimeMillis())
 
         if (cfg.cloudflareEnabled) {
             startTunnel(effective)

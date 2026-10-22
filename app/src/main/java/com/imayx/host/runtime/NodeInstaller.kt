@@ -25,17 +25,21 @@ class NodeInstaller(private val context: Context) {
     @Volatile
     private var cachedProbe: ExecUtil.Probe? = null
 
+    // Priority: a user-installed executable wins. The bundled libnode.so is a
+    // shared library (loaded in-process by the Server runtime via JNI) — it can
+    // never be executed as a child process, so it must not shadow a real node
+    // binary for NODE projects / one-off scripts.
     fun binary(): File? = when {
-        bundled.isFile -> bundled
         installed.isFile -> installed
+        bundled.isFile -> bundled
         else -> null
     }
 
     fun isInstalled(): Boolean = binary() != null
 
     fun source(): String? = when {
-        bundled.isFile -> "bundled"
         installed.isFile -> "downloaded"
+        bundled.isFile -> "bundled"
         else -> null
     }
 
