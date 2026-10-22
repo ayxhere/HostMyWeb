@@ -212,8 +212,22 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             try {
+                // Auto-detection runs BEFORE the list is read: never-configured
+                // projects get their real servers/entry detected and PERSISTED
+                // here (ProjectManager guards it to once per project per app
+                // session, and configured projects are never touched), so the
+                // cards and the settings dialog show them with no manual step.
+                val detected = withContext(Dispatchers.IO) { g.projects.autoDetectServers() }
                 val items = withContext(Dispatchers.IO) { g.projects.listInfo() }
                 _ui.value = _ui.value.copy(loading = false, items = items, error = null)
+                for (cfg in detected) {
+                    if (cfg.servers.isNotEmpty()) {
+                        _messages.emit(
+                            "Auto-detected ${cfg.servers.size} server(s) in ${cfg.name}: " +
+                                cfg.servers.joinToString { "${it.name} :${it.port}" }
+                        )
+                    }
+                }
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(loading = false, error = e.message ?: "Could not load projects")
             }

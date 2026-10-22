@@ -467,6 +467,91 @@ class ProjectManager(
         return cfg
     }
 
+    /** Project names already auto-detected in this app session (see [autoDetectServers]). */
+    private val autoDetectDone = HashSet<String>()
+
+    /**
+     * List-load auto-detection: the app itself understands what is inside a saved
+     * project — no Save, no "Detect" button press needed. For every project that
+     * was never configured (no saved server list and no entry file), the real
+     * scan runs ONCE per app session and what it finds is PERSISTED: the server
+     * list (folder · full entry path incl. src/ · auto port) and the primary
+     * entry file, so the project card and the settings dialog show the real
+     * servers immediately. A never-configured STATIC project whose files contain
+     * servers becomes a SERVER project — exactly what importing the same folder
+     * would have saved. Rules:
+     *  - A project with a saved server list or a user-set entry is configured
+     *    and never overridden (a missing entry is only derived from its own
+     *    saved list, without scanning).
+     *  - No port is ever renumbered: detected defs are built with the project's
+     *    OWN saved port for the main server (same builder as the Save path).
+     *  - The PENTAGI pseudo-project is not a file project and is never scanned.
+     * Returns the configs that were changed (and saved).
+     */
+    fun autoDetectServers(): List<ProjectConfig> {
+        val changed = ArrayList<ProjectConfig>()
+        for (cfg in store.list()) {
+            if (!autoDetectDone.add(cfg.name)) continue
+            try {
+                autoDetectProject(cfg)?.let { changed += it }
+            } catch (e: Exception) {
+                LogBus.w(LogCategory.SYSTEM, "Auto-detect failed for ${cfg.name}: ${e.message}")
+            }
+        }
+        return changed
+    }
+
+    private fun autoDetectProject(cfg: ProjectConfig): ProjectConfig? {
+        if (cfg.runtime == RuntimeType.PENTAGI) return null
+        if (cfg.servers.isNotEmpty()) {
+            // Configured already — only derive a missing entry from the list itself.
+            if (cfg.entryFile.isNotBlank()) return null
+            val prim = cfg.servers.firstOrNull { it.primary } ?: cfg.servers.first()
+            val out = cfg.copy(
+                entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
+            )
+            store.save(out)
+            return out
+        }
+        // A user-set entry (legacy single-server project) is a configuration — keep it.
+        if (cfg.entryFile.isNotBlank()) return null
+        val dir = store.projectDir(cfg.name)
+        if (!dir.isDirectory) return null
+        val found = ServerScanner.scan(dir)
+        if (found.isNotEmpty()) {
+            val defs = buildDefs(cfg.name, found, primaryPort = cfg.port)
+            val prim = defs.firstOrNull { it.primary } ?: defs.first()
+            val out = cfg.copy(
+                // STATIC becomes SERVER (import semantics); NODE keeps its runtime
+                // (it runs the entry file) but still gets the detected list so the
+                // settings dialog can show every server in the project.
+                runtime = if (cfg.runtime == RuntimeType.STATIC) RuntimeType.SERVER else cfg.runtime,
+                servers = defs,
+                port = prim.port,
+                entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
+            )
+            store.save(out)
+            LogBus.i(
+                LogCategory.SYSTEM,
+                "Auto-detected ${defs.size} server(s) in ${cfg.name}: " +
+                    defs.joinToString { "${it.name} ${if (it.dir.isEmpty()) it.entry else it.dir + "/" + it.entry} :${it.port}" }
+            )
+            return out
+        }
+        // No server folders: fill a lone entry for NODE/SERVER projects (same rule
+        // as the settings Save path). STATIC projects stay exactly as they are.
+        if (cfg.runtime == RuntimeType.NODE || cfg.runtime == RuntimeType.SERVER) {
+            val entry = detectServerEntry(dir)
+            if (entry != null) {
+                val out = cfg.copy(entryFile = entry)
+                store.save(out)
+                LogBus.i(LogCategory.SYSTEM, "Auto-detected entry for ${cfg.name}: $entry")
+                return out
+            }
+        }
+        return null
+    }
+
     fun exportZip(name: String, out: OutputStream): Int {
         val dir = store.projectDir(name)
         if (!dir.isDirectory) throw ProjectException("Project not found")

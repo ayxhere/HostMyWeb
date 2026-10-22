@@ -812,6 +812,55 @@ private fun ImportDialog(
     )
 }
 
+/**
+ * "Detected servers" list for the settings dialog (SERVER and NODE modes): one row
+ * per server the app detected in this project — Server N · folder name, the full
+ * entry path (incl. src/) as subtitle, an editable port and, for non-main servers,
+ * the subdomain. The rows come from the PERSISTED config (import / list-load
+ * auto-detection), never from a manual scan the user has to trigger.
+ */
+@Composable
+private fun DetectedServersSection(
+    servers: List<ServerDef>,
+    domain: String,
+    onServersChange: (List<ServerDef>) -> Unit
+) {
+    val c = Ix.c
+    Text(
+        "Detected servers (${servers.size}) — auto-selected",
+        color = c.soft,
+        style = MaterialTheme.typography.labelMedium
+    )
+    servers.forEachIndexed { i, sv ->
+        val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
+        SwitchRow(
+            "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
+            sv.enabled,
+            { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(enabled = v) }) },
+            subtitle = where
+        )
+        if (sv.enabled) {
+            IxTextField(
+                sv.port.toString(),
+                { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0) }) },
+                "Port",
+                keyboardType = KeyboardType.Number,
+                isError = sv.port !in 1024..65535,
+                supportingText = if (sv.primary) "Main server: uses the tunnel port while hosted" else null
+            )
+            if (!sv.primary) {
+                IxTextField(
+                    sv.subdomain,
+                    { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(subdomain = v.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '-' }.take(40)) }) },
+                    "Subdomain",
+                    placeholder = "api",
+                    supportingText = if (sv.subdomain.isBlank()) "Empty = no route" else sv.subdomain + "." + domain.ifBlank { "<domain>" }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConfigDialog(
     cfg: ProjectConfig,
@@ -894,37 +943,9 @@ private fun ConfigDialog(
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
                 } else if (runtime == RuntimeType.SERVER) {
                     if (servers.isEmpty()) {
-                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically. On Save, the real entry is auto-detected from the project files — or use \"Detect servers (AI)\" below.")
+                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically. Servers are auto-detected when the project list loads — if this field is empty, no server file was found in the project files.")
                     } else {
-                        Text("Servers in this project (${servers.size})", color = c.soft, style = MaterialTheme.typography.labelMedium)
-                        servers.forEachIndexed { i, sv ->
-                            val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
-                            SwitchRow(
-                                "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
-                                sv.enabled,
-                                { v -> servers = servers.toMutableList().also { it[i] = sv.copy(enabled = v) } },
-                                subtitle = where
-                            )
-                            if (sv.enabled) {
-                                IxTextField(
-                                    sv.port.toString(),
-                                    { v -> servers = servers.toMutableList().also { it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0) } },
-                                    "Port",
-                                    keyboardType = KeyboardType.Number,
-                                    isError = sv.port !in 1024..65535,
-                                    supportingText = if (sv.primary) "Main server: uses the tunnel port while hosted" else null
-                                )
-                                if (!sv.primary) {
-                                    IxTextField(
-                                        sv.subdomain,
-                                        { v -> servers = servers.toMutableList().also { it[i] = sv.copy(subdomain = v.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '-' }.take(40)) } },
-                                        "Subdomain",
-                                        placeholder = "api",
-                                        supportingText = if (sv.subdomain.isBlank()) "Empty = no route" else sv.subdomain + "." + domainClean.ifBlank { "<domain>" }
-                                    )
-                                }
-                            }
-                        }
+                        DetectedServersSection(servers, domainClean) { servers = it }
                         if (srvErr != null) Text(srvErr, color = c.danger, style = MaterialTheme.typography.bodySmall)
                     }
                     IxButton("Detect servers (AI)", onClick = onDetectAi, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
@@ -937,7 +958,8 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 } else {
-                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Leave blank: on Save, the real entry is auto-detected from the project files (e.g. src/server.js).")
+                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Auto-detected from the project files (e.g. src/server.js) when the project list loads — or type the path yourself.")
+                    if (servers.isNotEmpty()) DetectedServersSection(servers, domainClean) { servers = it }
                     IxTextField(args, { args = it }, "Arguments (optional)")
                     IxButton("Environment secrets…", onClick = onEnv, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     Text(
