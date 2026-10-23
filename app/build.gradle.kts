@@ -32,8 +32,8 @@ android {
         applicationId = "com.imayx.host"
         minSdk = 24
         targetSdk = 35
-        versionCode = 14
-        versionName = "3.7.3"
+        versionCode = 15
+        versionName = "3.7.4"
 
         ndk {
             // Embedded Node (libnode.so) ships arm64 only.
