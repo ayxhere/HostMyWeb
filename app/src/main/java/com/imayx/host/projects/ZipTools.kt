@@ -136,8 +136,15 @@ object ZipTools {
     /**
      * Extract [zip] into [dest]. Every entry is validated (Zip Slip / traversal / absolute paths) and the
      * real number of bytes written is capped, regardless of what the ZIP header claims.
+     * [skipEntry] (when set) receives each entry's path relative to [dest] AFTER any [stripPrefix]
+     * is removed; entries it accepts are not written at all (used by project updates, where the
+     * live runtime data and secrets must win over whatever the ZIP contains).
      */
-    fun extract(zip: File, dest: File, stripPrefix: String, onProgress: ((done: Int, total: Int) -> Unit)? = null): Int {
+    fun extract(
+        zip: File, dest: File, stripPrefix: String,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        skipEntry: ((String) -> Boolean)? = null
+    ): Int {
         dest.mkdirs()
         var written = 0L
         var count = 0
@@ -156,6 +163,7 @@ object ZipTools {
                     name = name.removePrefix(stripPrefix)
                 }
                 if (name.isEmpty()) continue
+                if (skipEntry?.invoke(name) == true) continue
                 val out = PathUtil.resolveInside(dest, name)
                     ?: throw SecurityException("Unsafe path in ZIP: ${e.name.take(120)}")
                 if (e.isDirectory) {

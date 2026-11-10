@@ -30,10 +30,7 @@ class ProjectManager(
 
     fun info(cfg: ProjectConfig): ProjectInfo {
         val dir = store.projectDir(cfg.name)
-        // ONE traversal for size + count + mtime (was three full walks — on a
-        // 7k-file node_modules tree that tripled the cost of every list refresh).
-        val s = PathUtil.folderStats(dir)
-        return ProjectInfo(cfg, s.sizeBytes, s.fileCount, s.lastModified)
+        return ProjectInfo(cfg, PathUtil.folderSize(dir), PathUtil.fileCount(dir), PathUtil.lastModified(dir))
     }
 
     fun listInfo(): List<ProjectInfo> = list().map { info(it) }
@@ -60,6 +57,21 @@ class ProjectManager(
         val base = name.substringAfterLast('/')
         return base in secretFileNames || base.endsWith(".key.json") || base.endsWith(".pem") ||
             (base.startsWith(".env.") && !base.endsWith(".example"))
+    }
+
+    /**
+     * Paths a ZIP update must never overwrite: the project's live runtime data
+     * (database, uploads) and any live secret file. The live files win; the
+     * ZIP's copies are skipped. Only applies when importing over an existing
+     * project — a fresh import takes everything from the ZIP as before.
+     * node_modules is exempt: a package's own data/ or .env fixtures are code,
+     * and fresh imports keep them too, so updates must not skip them either.
+     */
+    private fun isPreservedOnUpdate(rel: String): Boolean {
+        val segments = rel.split('/')
+        if ("node_modules" in segments) return false
+        if ("data" in segments || "uploads" in segments) return true
+        return isSecretFileName(rel)
     }
 
     private fun isSafeRelative(p: String): Boolean =
@@ -251,42 +263,61 @@ class ProjectManager(
         if (!info.isSafe) {
             throw ProjectException(info.error ?: "ZIP contains unsafe paths and was rejected")
         }
-        if (store.exists(name)) throw ProjectException("A project named \"$name\" already exists")
+        // Importing over an existing project is an UPDATE: the ZIP is applied
+        // OVER the live files, but the project's runtime data (database,
+        // uploads) and live secrets are never touched — the live files win.
+        // A fresh import takes everything from the ZIP exactly as before.
+        val isUpdate = store.exists(name)
+        val oldCfg = if (isUpdate) store.get(name) else null
         val dir = store.projectDir(name)
         try {
             dir.mkdirs()
-            val n = ZipTools.extract(zip, dir, info.stripPrefix, onProgress)
+            val n = if (isUpdate) {
+                ZipTools.extract(zip, dir, info.stripPrefix, onProgress, ::isPreservedOnUpdate)
+            } else {
+                ZipTools.extract(zip, dir, info.stripPrefix, onProgress)
+            }
             val warnings = ArrayList<String>()
-
-            // Secret quarantine: real keys must live in the app's encrypted env store,
-            // never inside an imported project (which can be exported/shared as a ZIP).
-            val quarantined = ArrayList<String>()
-            // Root AND server sub-folders (multi-server ZIPs keep a .env per server); node_modules is skipped.
-            fun sweep(d: File, depth: Int) {
-                d.listFiles()?.forEach { f ->
-                    if (f.isFile && isSecretFileName(f.name)) {
-                        quarantined.add(f.relativeTo(dir).path)
-                        f.delete()
-                    } else if (f.isDirectory && depth < 3 && f.name != "node_modules" && f.name != ".git") {
-                        sweep(f, depth + 1)
+            if (isUpdate) {
+                warnings.add(
+                    "Updated \"$name\": code files replaced — data/ (database), uploads/ and " +
+                        "Environment secrets were kept."
+                )
+            } else {
+                // Secret quarantine: real keys must live in the app's encrypted env store,
+                // never inside an imported project (which can be exported/shared as a ZIP).
+                // Fresh imports only: on an update the ZIP's secret files were already
+                // skipped during extraction, and sweeping the merged directory would
+                // delete the project's LIVE .env files.
+                val quarantined = ArrayList<String>()
+                // Root AND server sub-folders (multi-server ZIPs keep a .env per server); node_modules is skipped.
+                fun sweep(d: File, depth: Int) {
+                    d.listFiles()?.forEach { f ->
+                        if (f.isFile && isSecretFileName(f.name)) {
+                            quarantined.add(f.relativeTo(dir).path)
+                            f.delete()
+                        } else if (f.isDirectory && depth < 3 && f.name != "node_modules" && f.name != ".git") {
+                            sweep(f, depth + 1)
+                        }
                     }
                 }
-            }
-            sweep(dir, 0)
-            if (quarantined.isNotEmpty()) {
-                val msg = "Skipped secret file(s): ${quarantined.joinToString(", ")} — " +
-                    "put keys in Project → Settings → Environment secrets instead."
-                warnings.add(msg)
-                LogBus.w(LogCategory.SYSTEM, "Import $name: $msg")
+                sweep(dir, 0)
+                if (quarantined.isNotEmpty()) {
+                    val msg = "Skipped secret file(s): ${quarantined.joinToString(", ")} — " +
+                        "put keys in Project → Settings → Environment secrets instead."
+                    warnings.add(msg)
+                    LogBus.w(LogCategory.SYSTEM, "Import $name: $msg")
+                }
             }
 
             // Server detection: a Node.js project becomes a SERVER project (built-in
             // Node.js, one-tap start) instead of a static site.
+            val action = if (isUpdate) "Updated" else "Imported"
             val found = ServerScanner.scan(dir)
             val entry = found.firstOrNull { it.dir.isEmpty() }?.entry ?: found.firstOrNull()?.let {
                 if (it.dir.isEmpty()) it.entry else "${it.dir}/${it.entry}"
             } ?: detectServerEntry(dir)
-            val cfg = if (found.isNotEmpty()) {
+            val built = if (found.isNotEmpty()) {
                 val scanned = buildDefs(name, found)
                 // The import dialog's confirmed list wins for ports/enabled when it covers
                 // exactly the folders the real-file scan found; entry/name stay authoritative
@@ -305,7 +336,7 @@ class ProjectManager(
                         warnings.add("${d.name}: node_modules not found — this server will fail to start until its dependencies are included.")
                     }
                 }
-                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, ${defs.size} server(s): " +
+                LogBus.i(LogCategory.SYSTEM, "$action ZIP into server project $name ($n files, ${defs.size} server(s): " +
                     defs.joinToString { "${it.name}:${it.port}" } + ")")
                 val prim = defs.firstOrNull { it.primary } ?: defs.first()
                 ProjectConfig(
@@ -321,45 +352,58 @@ class ProjectManager(
                             "(production install) and re-import."
                     )
                 }
-                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into server project $name ($n files, entry=$entry)")
-                // ONE port for both the def and the project: the server binds the
-                // def's port and the tunnel targets the project's port — they must
-                // never disagree (was: def=primaryPort, project=nextFreePort()).
-                val p = nextFreePort()
+                LogBus.i(LogCategory.SYSTEM, "$action ZIP into server project $name ($n files, entry=$entry)")
                 val one = com.imayx.host.data.ServerDef(
                     name = PathUtil.sanitizeProjectName(name).lowercase().take(32), dir = "", entry = entry,
-                    port = p, subdomain = "", enabled = true, primary = true
+                    port = settings.primaryPort, subdomain = "", enabled = true, primary = true
                 )
-                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = p, entryFile = entry, servers = listOf(one))
+                ProjectConfig(name = name, runtime = RuntimeType.SERVER, port = nextFreePort(), entryFile = entry, servers = listOf(one))
             } else {
-                LogBus.i(LogCategory.SYSTEM, "Imported ZIP into project $name ($n files)")
+                LogBus.i(LogCategory.SYSTEM, "$action ZIP into project $name ($n files)")
                 ProjectConfig(name = name, port = nextFreePort())
             }
+            // An update re-detects servers/ports from the new code, but the
+            // project's own settings (domain, Cloudflare, auto-start/restart,
+            // root dir, SPA, node args, creation date) stay as the user set
+            // them — an update must not reset a working setup.
+            val cfg = if (isUpdate && oldCfg != null) {
+                built.copy(
+                    domain = oldCfg.domain,
+                    cloudflareEnabled = oldCfg.cloudflareEnabled,
+                    autoStart = oldCfg.autoStart,
+                    autoRestart = oldCfg.autoRestart,
+                    rootDir = oldCfg.rootDir,
+                    spa = oldCfg.spa,
+                    nodeArgs = oldCfg.nodeArgs,
+                    createdAt = oldCfg.createdAt
+                )
+            } else built
             store.save(cfg)
             if (settings.activeProject.isBlank()) settings.activeProject = name
             return ImportResult(cfg, entry, warnings)
         } catch (e: Exception) {
-            dir.deleteRecursively()
-            store.deleteConfig(name)
-            LogBus.e(LogCategory.SYSTEM, "ZIP import failed: ${e.message}")
+            if (isUpdate) {
+                // Never wipe a live project on a failed update: the project's
+                // data/, config and Environment secrets are untouched; only
+                // code files the ZIP already overwrote may be a mix of old
+                // and new — re-importing the same ZIP finishes the update.
+                LogBus.e(LogCategory.SYSTEM, "ZIP update of $name failed: ${e.message} — old data kept, re-import to retry")
+            } else {
+                dir.deleteRecursively()
+                store.deleteConfig(name)
+                LogBus.e(LogCategory.SYSTEM, "ZIP import failed: ${e.message}")
+            }
             throw if (e is ProjectException) e else ProjectException(e.message ?: "Import failed")
         } finally {
             zip.delete()
         }
     }
 
-    /** Assigns names, subdomains and free ports to freshly scanned servers.
-     *  [primaryPort] is the port the bundle's main server gets: the global primary
-     *  port for a brand-new import, or the PROJECT'S OWN saved port when filling /
-     *  re-detecting an existing project (its port must never be renumbered). */
-    private fun buildDefs(
-        project: String,
-        found: List<ServerScanner.Found>,
-        primaryPort: Int = settings.primaryPort
-    ): List<com.imayx.host.data.ServerDef> {
+    /** Assigns names, subdomains and free ports to freshly scanned servers. */
+    private fun buildDefs(project: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
         val used = store.list().filter { it.name != project }
             .flatMap { listOf(it.port) + it.servers.map { sv -> sv.port } }.toSet()
-        return ServerScanner.toDefs(found, project, used, primaryPort, maxOf(settings.defaultPort, 3200))
+        return ServerScanner.toDefs(found, project, used, settings.primaryPort, maxOf(settings.defaultPort, 3200))
     }
 
     /**
@@ -368,11 +412,8 @@ class ProjectManager(
      * never renumbers a working setup; new folders get fresh free ports.
      */
     fun previewDefs(name: String, found: List<ServerScanner.Found>): List<com.imayx.host.data.ServerDef> {
-        val existing = store.get(name)
-        // An existing project keeps its own port for the main server; only a
-        // brand-new import falls back to the global primary port.
-        val fresh = buildDefs(name, found, primaryPort = existing?.port ?: settings.primaryPort)
-        val cfg = existing ?: return fresh
+        val fresh = buildDefs(name, found)
+        val cfg = store.get(name) ?: return fresh
         val merged = fresh.map { f ->
             val old = cfg.servers.firstOrNull { it.dir == f.dir }
             if (old != null) f.copy(
@@ -403,9 +444,6 @@ class ProjectManager(
         val prim = defs.firstOrNull { it.primary } ?: defs.first()
         val out = cfg.copy(
             runtime = RuntimeType.SERVER, servers = defs,
-            // Keep the project-level port in sync with the main server's port:
-            // the server binds def.port, the tunnel targets project.port.
-            port = prim.port,
             entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
         )
         store.save(out)
@@ -427,129 +465,27 @@ class ProjectManager(
     }
 
     /**
-     * Fills a project's REAL entry from its files on save, so the entry shown and run
-     * is the detected path (e.g. src/server.js), never a "server.js" placeholder:
-     *  - A SERVER project saved with an empty server list gets the full detected
-     *    server list (and its project port synced to the main server's port).
-     *  - A NODE project saved with a blank entry gets the detected entry — a blank
-     *    entry must never dead-end the settings dialog; the file either exists in
-     *    the project (and is used) or the entry stays blank and start reports it.
-     * A user-typed entry is never overwritten.
+     * A SERVER project saved with an empty server list (e.g. the runtime was switched by
+     * hand): detect the real servers from the project files so the entry shown and run is
+     * the REAL path (e.g. backend/server.js), never the "server.js" placeholder default.
      */
     fun fillDetectedServers(cfg: ProjectConfig): ProjectConfig {
+        if (cfg.runtime != RuntimeType.SERVER || cfg.servers.isNotEmpty()) return cfg
         val dir = store.projectDir(cfg.name)
         if (!dir.isDirectory) return cfg
-        if (cfg.runtime == RuntimeType.SERVER && cfg.servers.isEmpty()) {
-            val found = ServerScanner.scan(dir)
-            if (found.isNotEmpty()) {
-                // The project's OWN saved port becomes the main server's port —
-                // auto-detect must never renumber a port the user already set.
-                val defs = buildDefs(cfg.name, found, primaryPort = cfg.port)
-                val prim = defs.firstOrNull { it.primary } ?: defs.first()
-                return cfg.copy(
-                    servers = defs,
-                    port = prim.port,
-                    entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
-                )
-            }
-            val entry = detectServerEntry(dir)
-            // Nothing detected: clear any stale entry (e.g. an old "server.js" guess) —
-            // the settings field must show EMPTY, never a made-up default.
-            return if (entry != null) cfg.copy(entryFile = entry) else cfg.copy(entryFile = "")
-        }
-        if (cfg.runtime == RuntimeType.NODE && cfg.entryFile.isBlank()) {
-            val found = ServerScanner.scan(dir)
-            val prim = found.firstOrNull { it.dir.isEmpty() } ?: found.firstOrNull()
-            val entry = prim?.let { if (it.dir.isEmpty()) it.entry else "${it.dir}/${it.entry}" }
-                ?: detectServerEntry(dir)
-            return if (entry != null) cfg.copy(entryFile = entry) else cfg
-        }
-        return cfg
-    }
-
-    /** Project names already auto-detected in this app session (see [autoDetectServers]). */
-    private val autoDetectDone = HashSet<String>()
-
-    /**
-     * List-load auto-detection: the app itself understands what is inside a saved
-     * project — no Save, no "Detect" button press needed. For every project that
-     * was never configured (no saved server list and no entry file), the real
-     * scan runs ONCE per app session and what it finds is PERSISTED: the server
-     * list (folder · full entry path incl. src/ · auto port) and the primary
-     * entry file, so the project card and the settings dialog show the real
-     * servers immediately. A never-configured STATIC project whose files contain
-     * servers becomes a SERVER project — exactly what importing the same folder
-     * would have saved. Rules:
-     *  - A project with a saved server list or a user-set entry is configured
-     *    and never overridden (a missing entry is only derived from its own
-     *    saved list, without scanning).
-     *  - No port is ever renumbered: detected defs are built with the project's
-     *    OWN saved port for the main server (same builder as the Save path).
-     *  - The PENTAGI pseudo-project is not a file project and is never scanned.
-     * Returns the configs that were changed (and saved).
-     */
-    fun autoDetectServers(): List<ProjectConfig> {
-        val changed = ArrayList<ProjectConfig>()
-        for (cfg in store.list()) {
-            if (!autoDetectDone.add(cfg.name)) continue
-            try {
-                autoDetectProject(cfg)?.let { changed += it }
-            } catch (e: Exception) {
-                LogBus.w(LogCategory.SYSTEM, "Auto-detect failed for ${cfg.name}: ${e.message}")
-            }
-        }
-        return changed
-    }
-
-    private fun autoDetectProject(cfg: ProjectConfig): ProjectConfig? {
-        if (cfg.runtime == RuntimeType.PENTAGI) return null
-        if (cfg.servers.isNotEmpty()) {
-            // Configured already — only derive a missing entry from the list itself.
-            if (cfg.entryFile.isNotBlank()) return null
-            val prim = cfg.servers.firstOrNull { it.primary } ?: cfg.servers.first()
-            val out = cfg.copy(
-                entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
-            )
-            store.save(out)
-            return out
-        }
-        // A user-set entry (legacy single-server project) is a configuration — keep it.
-        if (cfg.entryFile.isNotBlank()) return null
-        val dir = store.projectDir(cfg.name)
-        if (!dir.isDirectory) return null
         val found = ServerScanner.scan(dir)
         if (found.isNotEmpty()) {
-            val defs = buildDefs(cfg.name, found, primaryPort = cfg.port)
+            val defs = buildDefs(cfg.name, found)
             val prim = defs.firstOrNull { it.primary } ?: defs.first()
-            val out = cfg.copy(
-                // STATIC becomes SERVER (import semantics); NODE keeps its runtime
-                // (it runs the entry file) but still gets the detected list so the
-                // settings dialog can show every server in the project.
-                runtime = if (cfg.runtime == RuntimeType.STATIC) RuntimeType.SERVER else cfg.runtime,
+            return cfg.copy(
                 servers = defs,
-                port = prim.port,
                 entryFile = if (prim.dir.isEmpty()) prim.entry else "${prim.dir}/${prim.entry}"
             )
-            store.save(out)
-            LogBus.i(
-                LogCategory.SYSTEM,
-                "Auto-detected ${defs.size} server(s) in ${cfg.name}: " +
-                    defs.joinToString { "${it.name} ${if (it.dir.isEmpty()) it.entry else it.dir + "/" + it.entry} :${it.port}" }
-            )
-            return out
         }
-        // No server folders: fill a lone entry for NODE/SERVER projects (same rule
-        // as the settings Save path). STATIC projects stay exactly as they are.
-        if (cfg.runtime == RuntimeType.NODE || cfg.runtime == RuntimeType.SERVER) {
-            val entry = detectServerEntry(dir)
-            if (entry != null) {
-                val out = cfg.copy(entryFile = entry)
-                store.save(out)
-                LogBus.i(LogCategory.SYSTEM, "Auto-detected entry for ${cfg.name}: $entry")
-                return out
-            }
-        }
-        return null
+        val entry = detectServerEntry(dir)
+        // Nothing detected: clear any stale entry (e.g. an old "server.js" guess) —
+        // the settings field must show EMPTY, never a made-up default.
+        return if (entry != null) cfg.copy(entryFile = entry) else cfg.copy(entryFile = "")
     }
 
     fun exportZip(name: String, out: OutputStream): Int {

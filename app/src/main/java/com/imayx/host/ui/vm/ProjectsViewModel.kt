@@ -122,6 +122,9 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun nodeInstalled(): Boolean = g.nodeInstaller.isInstalled()
 
+    /** The port the primary (active) project always binds to — the tunnel target. */
+    fun primaryPort(): Int = g.settings.primaryPort
+
     /** True when the built-in Node.js (libnode.so) is bundled and SERVER projects can run. */
     fun serverAvailable(): Boolean = com.imayx.host.node.ServerRuntime.isAvailable()
 
@@ -204,33 +207,6 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Resets the BUILT-IN AyX backend's admin (forgotten-password recovery):
-     * deletes the admin account, its sessions, lockouts and 2FA challenges
-     * server-side so [createBackendAdmin] can run again. Group data is not
-     * touched. Like create, this targets the app-wide built-in backend,
-     * not the project whose settings dialog opened it.
-     */
-    fun resetBackendAdmin() {
-        viewModelScope.launch {
-            _ui.value = _ui.value.copy(busy = "Resetting AyX backend admin…")
-            val (ok, msg) = withContext(Dispatchers.IO) {
-                val done = CompletableDeferred<Pair<Boolean, String>>()
-                try {
-                    AyxBackendRuntime.resetAdmin(
-                        getApplication()
-                    ) { ok, message -> done.complete(ok to message) }
-                } catch (e: Exception) {
-                    done.complete(false to (e.message ?: "Could not reset admin"))
-                }
-                done.await()
-            }
-            _ui.value = _ui.value.copy(busy = null)
-            _scriptResult.value = if (ok) "AyX backend admin reset.\n\n$msg\n\nNow create a new admin with \"Create admin account…\"."
-            else "Could not reset the admin account.\n\n$msg"
-        }
-    }
-
     private fun isHosted(name: String): Boolean {
         val h = g.host.state.value
         return (h.project == name || name in h.extras) && h.state != ProcessState.STOPPED
@@ -239,22 +215,8 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             try {
-                // Auto-detection runs BEFORE the list is read: never-configured
-                // projects get their real servers/entry detected and PERSISTED
-                // here (ProjectManager guards it to once per project per app
-                // session, and configured projects are never touched), so the
-                // cards and the settings dialog show them with no manual step.
-                val detected = withContext(Dispatchers.IO) { g.projects.autoDetectServers() }
                 val items = withContext(Dispatchers.IO) { g.projects.listInfo() }
                 _ui.value = _ui.value.copy(loading = false, items = items, error = null)
-                for (cfg in detected) {
-                    if (cfg.servers.isNotEmpty()) {
-                        _messages.emit(
-                            "Auto-detected ${cfg.servers.size} server(s) in ${cfg.name}: " +
-                                cfg.servers.joinToString { "${it.name} :${it.port}" }
-                        )
-                    }
-                }
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(loading = false, error = e.message ?: "Could not load projects")
             }
@@ -360,6 +322,12 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun confirmImport(name: String, defsOverride: List<ServerDef>? = null) {
         val st = _stage.value ?: return
+        // Updating a running project would swap its code files out from under
+        // the live server — stop hosting first (same guard as delete/rename).
+        if (isHosted(name)) {
+            _messages.tryEmit("Stop hosting before updating this project")
+            return
+        }
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = "Importing…", progress = 0f)
             try {
@@ -437,7 +405,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
                 if (found.isEmpty()) {
                     _messages.emit(
                         if (aiRan) "AI also found no Node.js server in $name. Check the folder in Files."
-                        else "No server found. Add an AI API key (Settings → AI), then use Detect servers (AI)."
+                        else "No server found. Add a Groq API key (Settings → AI auto-fix), then use Detect servers (AI)."
                     )
                     return@launch
                 }
@@ -469,7 +437,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun aiFix(name: String) {
         val app = getApplication<Application>()
         if (!com.imayx.host.ai.AiFixer.isConfigured(g.secrets)) {
-            viewModelScope.launch { _messages.emit("Add an AI API key first: Settings → AI (Groq, Google Gemini or OpenRouter)") }
+            viewModelScope.launch { _messages.emit("Add a Groq API key first: Settings → AI auto-fix") }
             return
         }
         _ui.value = _ui.value.copy(busy = "AI fixing $name…")
@@ -500,10 +468,11 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
     fun startSelected(names: List<String>) {
         if (names.isEmpty()) return
         val picked = _ui.value.items.map { it.config }.filter { it.name in names }
-        // Every project runs on its OWN saved port (for a SERVER project that is its
-        // main server's port — the two are kept in sync). Two projects on the same
-        // port can never run together — name them.
-        val effPorts = picked.associate { it.name to it.port }
+        // Mirror HostController.doStartMany: the first Cloudflare-enabled project becomes the
+        // primary and always binds the primary (tunnel) port; the rest keep their own ports.
+        // Two projects on the same EFFECTIVE port can never run together — name them.
+        val primary = picked.sortedByDescending { it.cloudflareEnabled }.firstOrNull()
+        val effPorts = picked.associate { it.name to if (it.name == primary?.name) g.settings.primaryPort else it.port }
         val clash = effPorts.entries.groupBy({ it.value }, { it.key }).filter { it.value.size > 1 }
         if (clash.isNotEmpty()) {
             val msg = clash.entries.joinToString("; ") { (port, list) ->
@@ -511,7 +480,7 @@ class ProjectsViewModel(app: Application) : AndroidViewModel(app) {
             }
             _messages.tryEmit(
                 "$msg. Change a port in Project Settings first " +
-                    "(every project runs on its own saved port)."
+                    "(the primary project always uses port ${g.settings.primaryPort})."
             )
             return
         }

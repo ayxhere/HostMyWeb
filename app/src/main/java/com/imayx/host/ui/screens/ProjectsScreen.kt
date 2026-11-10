@@ -193,9 +193,8 @@ fun ProjectsScreen(
                         info.config.name in host.extras && host.state == ProcessState.RUNNING -> ProcessState.RUNNING
                         else -> ProcessState.STOPPED
                     }
-                    // A hosted project always serves on its OWN saved port (for a
-                    // SERVER project: its main server's port — kept in sync).
-                    val effPort = info.config.port
+                    // The primary project always serves on the primary (tunnel) port while running.
+                    val effPort = if (isPrimary && hostedState != ProcessState.STOPPED) vm.primaryPort() else info.config.port
                     ProjectCard(
                         info = info,
                         isActive = vm.activeProject == info.config.name,
@@ -309,7 +308,6 @@ fun ProjectsScreen(
                 gate.request(lock) { envFor = cfg.name }
             },
             onCreateAdmin = { u, p -> vm.createBackendAdmin(cfg.name, u, p) },
-            onResetAdmin = { vm.resetBackendAdmin() },
             onRunScript = { cmd -> vm.runNodeCommandLine(cfg.name, cmd) },
             onDetectAi = {
                 configFor = null
@@ -435,7 +433,6 @@ private fun ProjectCard(
                             RuntimeType.STATIC -> "STATIC"
                             RuntimeType.NODE -> "NODE"
                             RuntimeType.SERVER -> "SERVER"
-                            RuntimeType.PENTAGI -> "PENTAGI"
                         }, c.accent
                     )
                     if (isActive) StatusPill("ACTIVE", c.ok)
@@ -457,7 +454,7 @@ private fun ProjectCard(
                     DropdownMenuItem(text = { Text("Export ZIP", color = c.text) }, onClick = { menu = false; onExport() })
                     if (cfg.runtime == RuntimeType.SERVER) {
                         DropdownMenuItem(
-                            text = { Text("✦ AI Fix", color = c.text) },
+                            text = { Text("✦ AI Fix (Groq)", color = c.text) },
                             onClick = { menu = false; onAiFix() }
                         )
                         DropdownMenuItem(
@@ -483,7 +480,7 @@ private fun ProjectCard(
         if (cfg.runtime == RuntimeType.SERVER && cfg.servers.isNotEmpty()) {
             // One row per detected server: "Server 1 · api · :3201 → api.<domain>"
             cfg.servers.forEachIndexed { i, sv ->
-                val port = sv.port
+                val port = if (isPrimary && sv.primary && hostedState != ProcessState.STOPPED) effPort else sv.port
                 val host = if (sv.primary || sv.subdomain.isBlank()) "main (tunnel :$effPort)"
                 else sv.subdomain + "." + cfg.domain.ifBlank { "<domain>" }
                 val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
@@ -575,7 +572,7 @@ private fun CreateAdminDialog(onDismiss: () -> Unit, onConfirm: (String, String)
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Creates the admin account on this app's built-in AyX backend. The password is sent only to that backend (over loopback) and is never stored.",
+                    "Runs: node scripts/create-admin.js — the password is passed to the process only and is never stored.",
                     color = c.soft,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -596,41 +593,6 @@ private fun CreateAdminDialog(onDismiss: () -> Unit, onConfirm: (String, String)
             }
         },
         confirmButton = { IxButton("Create", onClick = { onConfirm(username, password) }, enabled = valid) },
-        dismissButton = { IxButton("Cancel", onDismiss, kind = BtnKind.Ghost) }
-    )
-}
-
-/**
- * Confirmation for resetting the BUILT-IN AyX backend's admin. States exactly
- * what is deleted (the admin account + its sessions, login lockouts and 2FA
- * challenges) and what is NOT (group data) — the reset exists so a forgotten
- * admin password is recoverable via "Create admin account…" afterwards.
- */
-@Composable
-private fun ResetBackendAdminDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    val c = Ix.c
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = c.card,
-        titleContentColor = c.text,
-        textContentColor = c.soft,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-        title = { Text("Reset AyX backend admin") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "This deletes the admin account of this app's built-in AyX backend — including its sign-in sessions, login lockouts and 2FA challenges — so you can create a new admin with \"Create admin account…\".",
-                    color = c.soft,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    "Group data, announcements, statuses, installations and media are NOT touched.",
-                    color = c.soft,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        },
-        confirmButton = { IxButton("Reset admin", onClick = onConfirm) },
         dismissButton = { IxButton("Cancel", onDismiss, kind = BtnKind.Ghost) }
     )
 }
@@ -723,7 +685,11 @@ private fun ImportDialog(
     val c = Ix.c
     val info = stage.info
     var name by remember(stage) { mutableStateOf(stage.suggestedName) }
-    val err = nameError(name) ?: if (existing.contains(name)) "A project with this name already exists" else null
+    // An existing name is an UPDATE, not an error: the ZIP is applied over the
+    // live project, and its data (database, uploads), live .env and Environment
+    // secrets are kept. Only a malformed name still blocks the import.
+    val isUpdate = existing.contains(name.trim())
+    val err = nameError(name)
     // Detected servers with their auto-assigned ports — the user can fix a port before importing.
     var defs by remember(stage) { mutableStateOf(stage.detection?.defs ?: emptyList()) }
     val defsErr = when {
@@ -834,11 +800,20 @@ private fun ImportDialog(
                     isError = err != null,
                     supportingText = err
                 )
+                if (isUpdate) {
+                    Text(
+                        "This project already exists — importing will update it. Code files are " +
+                            "replaced, but its data (database, uploads), live .env and " +
+                            "Environment secrets are kept.",
+                        color = c.warn,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         },
         confirmButton = {
             IxButton(
-                "Import",
+                if (isUpdate) "Update" else "Import",
                 onClick = { onImport(name.trim(), defs.ifEmpty { null }) },
                 enabled = info.isSafe && err == null && defsErr == null && !busy,
                 loading = busy
@@ -846,55 +821,6 @@ private fun ImportDialog(
         },
         dismissButton = { IxButton("Cancel", onCancel, kind = BtnKind.Ghost, enabled = !busy) }
     )
-}
-
-/**
- * "Detected servers" list for the settings dialog (SERVER and NODE modes): one row
- * per server the app detected in this project — Server N · folder name, the full
- * entry path (incl. src/) as subtitle, an editable port and, for non-main servers,
- * the subdomain. The rows come from the PERSISTED config (import / list-load
- * auto-detection), never from a manual scan the user has to trigger.
- */
-@Composable
-private fun DetectedServersSection(
-    servers: List<ServerDef>,
-    domain: String,
-    onServersChange: (List<ServerDef>) -> Unit
-) {
-    val c = Ix.c
-    Text(
-        "Detected servers (${servers.size}) — auto-selected",
-        color = c.soft,
-        style = MaterialTheme.typography.labelMedium
-    )
-    servers.forEachIndexed { i, sv ->
-        val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
-        SwitchRow(
-            "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
-            sv.enabled,
-            { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(enabled = v) }) },
-            subtitle = where
-        )
-        if (sv.enabled) {
-            IxTextField(
-                sv.port.toString(),
-                { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0) }) },
-                "Port",
-                keyboardType = KeyboardType.Number,
-                isError = sv.port !in 1024..65535,
-                supportingText = if (sv.primary) "Main server: uses the tunnel port while hosted" else null
-            )
-            if (!sv.primary) {
-                IxTextField(
-                    sv.subdomain,
-                    { v -> onServersChange(servers.toMutableList().also { it[i] = sv.copy(subdomain = v.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '-' }.take(40)) }) },
-                    "Subdomain",
-                    placeholder = "api",
-                    supportingText = if (sv.subdomain.isBlank()) "Empty = no route" else sv.subdomain + "." + domain.ifBlank { "<domain>" }
-                )
-            }
-        }
-    }
 }
 
 @Composable
@@ -906,7 +832,6 @@ private fun ConfigDialog(
     onSave: (ProjectConfig) -> Unit,
     onEnv: () -> Unit,
     onCreateAdmin: (String, String) -> Unit,
-    onResetAdmin: () -> Unit,
     onRunScript: (String) -> Unit,
     onDetectAi: () -> Unit = {}
 ) {
@@ -923,7 +848,6 @@ private fun ConfigDialog(
     var entry by remember { mutableStateOf(cfg.entryFile) }
     var args by remember { mutableStateOf(cfg.nodeArgs) }
     var showAdmin by remember { mutableStateOf(false) }
-    var showResetAdmin by remember { mutableStateOf(false) }
     var oneOff by remember { mutableStateOf("") }
 
     val portNum = port.toIntOrNull()
@@ -931,12 +855,11 @@ private fun ConfigDialog(
     val domainClean = cleanDomain(domain)
     val domainErr = if (domainClean.isNotEmpty() && !isValidHostname(domainClean)) "Enter a valid hostname, e.g. example.com" else null
     val rootErr = if (rootDir.contains("..") || rootDir.startsWith("/")) "Must be a relative folder inside the project" else null
-    // Blank entry is NEVER an error: on Save the real entry is auto-detected from
-    // the project files (SERVER: full server list; NODE: the entry file) and the
-    // detected path is stored — or the entry stays blank, never a "server.js" guess.
-    // Only an unsafe path (traversal / absolute) is an error.
+    // Blank entry is an error only for NODE (a hand-run script must be named). For
+    // SERVER projects blank means "nothing detected yet" — Save re-detects from the
+    // files and stores the real path or leaves it EMPTY, never a "server.js" guess.
     val entryErr = if ((runtime == RuntimeType.NODE || runtime == RuntimeType.SERVER) &&
-        (entry.contains("..") || entry.startsWith("/"))
+        (entry.contains("..") || entry.startsWith("/") || (runtime == RuntimeType.NODE && entry.isBlank()))
     ) "Relative file inside the project" else null
     val active = servers.filter { it.enabled }
     val srvErr = when {
@@ -975,15 +898,43 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                if (!(runtime == RuntimeType.SERVER && servers.isNotEmpty())) IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "The port THIS project runs on. When it is hosted, the Cloudflare tunnel targets this port.", keyboardType = KeyboardType.Number)
+                if (!(runtime == RuntimeType.SERVER && servers.isNotEmpty())) IxTextField(port, { port = it.filter(Char::isDigit).take(5) }, "Port", isError = portErr != null, supportingText = portErr ?: "Used when this project runs alongside others. The ACTIVE project always uses the primary port (Settings).", keyboardType = KeyboardType.Number)
                 if (runtime == RuntimeType.STATIC) {
                     IxTextField(rootDir, { rootDir = it.trim() }, "Root directory (optional)", placeholder = "e.g. dist", isError = rootErr != null, supportingText = rootErr ?: "Sub-folder that is served. Empty = project root.")
                     SwitchRow("SPA mode", spa, { spa = it }, subtitle = "Unknown routes fall back to index.html")
                 } else if (runtime == RuntimeType.SERVER) {
                     if (servers.isEmpty()) {
-                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically. Servers are auto-detected when the project list loads — if this field is empty, no server file was found in the project files.")
+                        IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Server file to run, e.g. src/server.js. PORT is set automatically. On Save, the real entry is auto-detected from the project files — or use \"Detect servers (AI)\" below.")
                     } else {
-                        DetectedServersSection(servers, domainClean) { servers = it }
+                        Text("Servers in this project (${servers.size})", color = c.soft, style = MaterialTheme.typography.labelMedium)
+                        servers.forEachIndexed { i, sv ->
+                            val where = if (sv.dir.isEmpty()) sv.entry else sv.dir + "/" + sv.entry
+                            SwitchRow(
+                                "Server ${i + 1} · ${sv.name}" + if (sv.primary) " (main)" else "",
+                                sv.enabled,
+                                { v -> servers = servers.toMutableList().also { it[i] = sv.copy(enabled = v) } },
+                                subtitle = where
+                            )
+                            if (sv.enabled) {
+                                IxTextField(
+                                    sv.port.toString(),
+                                    { v -> servers = servers.toMutableList().also { it[i] = sv.copy(port = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0) } },
+                                    "Port",
+                                    keyboardType = KeyboardType.Number,
+                                    isError = sv.port !in 1024..65535,
+                                    supportingText = if (sv.primary) "Main server: uses the tunnel port while hosted" else null
+                                )
+                                if (!sv.primary) {
+                                    IxTextField(
+                                        sv.subdomain,
+                                        { v -> servers = servers.toMutableList().also { it[i] = sv.copy(subdomain = v.lowercase().filter { ch -> ch.isLetterOrDigit() || ch == '-' }.take(40)) } },
+                                        "Subdomain",
+                                        placeholder = "api",
+                                        supportingText = if (sv.subdomain.isBlank()) "Empty = no route" else sv.subdomain + "." + domainClean.ifBlank { "<domain>" }
+                                    )
+                                }
+                            }
+                        }
                         if (srvErr != null) Text(srvErr, color = c.danger, style = MaterialTheme.typography.bodySmall)
                     }
                     IxButton("Detect servers (AI)", onClick = onDetectAi, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
@@ -996,8 +947,7 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 } else {
-                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr ?: "Auto-detected from the project files (e.g. src/server.js) when the project list loads — or type the path yourself.")
-                    if (servers.isNotEmpty()) DetectedServersSection(servers, domainClean) { servers = it }
+                    IxTextField(entry, { entry = it.trim() }, "Entry file", isError = entryErr != null, supportingText = entryErr)
                     IxTextField(args, { args = it }, "Arguments (optional)")
                     IxButton("Environment secrets…", onClick = onEnv, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     Text(
@@ -1006,7 +956,6 @@ private fun ConfigDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                     IxButton("Create admin account…", onClick = { showAdmin = true }, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
-                    IxButton("Reset AyX backend admin…", onClick = { showResetAdmin = true }, kind = BtnKind.Secondary, modifier = Modifier.fillMaxWidth())
                     IxTextField(
                         value = oneOff,
                         onValueChange = { oneOff = it },
@@ -1060,16 +1009,6 @@ private fun ConfigDialog(
             onConfirm = { u, p ->
                 showAdmin = false
                 onCreateAdmin(u, p)
-            }
-        )
-    }
-
-    if (showResetAdmin) {
-        ResetBackendAdminDialog(
-            onDismiss = { showResetAdmin = false },
-            onConfirm = {
-                showResetAdmin = false
-                onResetAdmin()
             }
         )
     }
