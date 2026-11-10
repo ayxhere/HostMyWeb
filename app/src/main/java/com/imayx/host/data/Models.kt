@@ -1,6 +1,6 @@
 package com.imayx.host.data
 
-enum class RuntimeType { STATIC, NODE, SERVER }
+enum class RuntimeType { STATIC, NODE, SERVER, PENTAGI }
 
 enum class ProcessState { STOPPED, STARTING, RUNNING, FAILED }
 
@@ -9,7 +9,8 @@ enum class LogCategory(val label: String) {
     CLOUDFLARE("Cloudflare"),
     NODE("Node"),
     SYSTEM("System"),
-    ERRORS("Errors")
+    ERRORS("Errors"),
+    PENTAGI("PentAGI")
 }
 
 enum class LogLevel { DEBUG, INFO, WARN, ERROR }
@@ -100,3 +101,4 @@ data class HostState(
 ) {
     val localUrl: String get() = "http://127.0.0.1:$port"
 }
+
